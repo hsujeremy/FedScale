@@ -1,34 +1,57 @@
-import numpy as np
-import copy
-import time
-import threading
 import collections
+import copy
+import math
+import random
+import threading
+import time
+import grpc
+
+from concurrent import futures
 from random import Random
+
+import numpy as np
+import torch
+import wandb
+
 import fedscale.cloud.logger.executor_logging as logger
 from fedscale.cloud.client_manager import ClientManager
-from fedscale.cloud.fllibs import *
-from fedscale.cloud.execution.torch_client import TorchClient
-from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
+import fedscale.cloud.channels.job_api_pb2_grpc as job_api_pb2_grpc
+import fedscale.cloud.channels.job_api_pb2 as job_api_pb2
+from fedscale.cloud.gossip.gossip_channel_context import ClientConnections
 from fedscale.cloud.execution.data_processor import collate, voice_collate_fn
+from fedscale.cloud.execution.torch_client import TorchClient
+from fedscale.cloud.fllibs import *
+from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
 
 """
 Make a server for each client 
 """
+MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
 
-class Executor(object):
-    def __init__(self, num_iterations=100, client_id=0):
+# TODO: implement CLIENT_REGISTER, CLIENT_PING, CLIENT_EXECUTE_COMPLETION
+
+class Executor(job_api_pb2_grpc.JobServiceServicer):
+    def __init__(self, args, num_iterations=100, client_id=0, ports=10):
         self.num_iterations = num_iterations
         self.model = None
         self.client_id = client_id
 
         self.training_sets = self.test_dataset = None
 
+        # init model weights here? training config contains model weights under "model"
+        # model weights are stored under self.model_adapter.get_weights
+        self.client = TorchClient(args)
+        self.model_adapter = self.client.get_model_adapter(init_model())
+
+        self.args = args
+        self.num_executors = args.num_executors
 
         # ======== Event Queue =======
         self.individual_client_events = {}  # Unicast
         self.events_queue = collections.deque()
 
         # ======== Model and Data ========
+        self.training_sets = self.test_dataset = None
         self.model_wrapper = None
         self.model_in_update = 0
         self.update_lock = threading.Lock()
@@ -37,7 +60,77 @@ class Executor(object):
         self.temp_model_path = os.path.join(
             logger.logDir, 'model_'+str(args.this_rank)+".npy")
         self.last_saved_round = 0
-    
+
+        self.client_manager = self.init_client_manager(args=args)
+
+
+        # ======== channels ========
+        # TODO Make connections to other executors
+        self.client_communicator = ClientConnections(
+            args.ps_ip, client_id, ports)
+
+        # ======== runtime information ========
+        self.collate_fn = None
+        self.round = 0
+        self.start_run_time = time.time()
+        self.received_stop_request = False
+
+        if args.wandb_token != "":
+            os.environ['WANDB_API_KEY'] = args.wandb_token
+            self.wandb = wandb
+            if self.wandb.run is None:
+                self.wandb.init(project=f'fedscale-{args.job_name}',
+                                name=f'executor{args.this_rank}-{args.time_stamp}',
+                                group=f'{args.time_stamp}')
+            else:
+                logging.error("Warning: wandb has already been initialized")
+
+        else:
+            self.wandb = None
+        super(Executor, self).__init__()
+
+    def init_control_communication(self):
+        """creates a server on the client
+        """
+
+        # simulation mode
+        # num_of_executors = 0
+        # for ip_numgpu in self.args.executor_configs.split("="):
+        #     ip, numgpu = ip_numgpu.split(':')
+        #     for numexe in numgpu.strip()[1:-1].split(','):
+        #         for _ in range(int(numexe.strip())):
+        #             num_of_executors += 1
+        # self.executors = list(range(num_of_executors))
+
+        self.grpc_server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=20),
+            options=[
+                ('grpc.max_send_message_length', MAX_MESSAGE_LENGTH),
+                ('grpc.max_receive_message_length', MAX_MESSAGE_LENGTH),
+            ],
+        )
+
+        job_api_pb2_grpc.add_JobServiceServicer_to_server(
+            self, self.grpc_server)
+
+        port = '[::]:{}'.format(self.client_id)
+        logging.info(
+            f'%%%%%%%%%% Opening aggregator server using port {port} %%%%%%%%%%')
+
+        self.grpc_server.add_insecure_port(port)
+        self.grpc_server.start()
+        self.client_communicator.connect_to_server()
+
+    def setup_env(self, seed=1):
+        """Set up experiments environment
+        """
+        logging.info(f"(EXECUTOR:{self.this_rank}) is setting up environ ...")
+        torch.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+
     def init_data(self):
         """Return the training and testing dataset
 
@@ -75,23 +168,33 @@ class Executor(object):
         replies, then we should select 10 neighbors).
         """
 
-        clients_online = ClientManager.getFeasibleClients(cur_time)
+        clients_online = self.client_manager.getFeasibleClients(cur_time)
         rng = Random()
         rng.seed(233)
         rng.shuffle(clients_online)
         client_len = min(min_replies * buffer_factor, len(clients_online)-1)
         return clients_online[:client_len]
 
-    def train(self, config): 
-        client_id, train_config = config['client_id'], config['task_config']
-        assert 'model' in config
+    def train(self, config):
 
+        # few batches 
+        # for i in range(10):
+        #     response = self.client_communicator.stubs[client_id].CLIENT_EXECUTE_COMPLETION(
+        #         job_api_pb2.CompleteRequest(
+        #             client_id=str(client_id), executor_id=self.executor_id,
+        #             event=commons.CLIENT_TRAIN, status=True, msg=None,
+        #             meta_result=None, data_result=None
+        #         )
+        #     )
+        # client_id, train_config = config['client_id'], config['task_config']
+        # assert 'model' in config
+        # train_res = self.training_handler(
+        #     client_id=client_id, conf=train_config, model=config['model'])
 
-        # use torchclient trainer 
-        client = TorchClient()
+        # use torchclient trainer
         pass
 
-    def training_handler(self, conf, model, client):
+    def training_handler(self, conf, model):
         """Train model given client id
 
         Args:
@@ -109,28 +212,39 @@ class Executor(object):
                            batch_size=conf.batch_size, args=self.args,
                            collate_fn=self.collate_fn
                            )
-        train_res = client.train(
+        train_res = self.client.train(
             client_data=client_data, model=self.model_adapter.get_model(), conf=conf)
 
         return train_res
 
-    def run(self): 
+    def run(self):
         """
             after each training loop,
                 check # of incoming requests: 
                     clients to send weights
         """
+        self.setup_env()
+        self.init_control_communication()
+
+        self.training_sets, self.testing_sets = self.init_data()
+        train_res = None
 
         for i in range(self.num_iterations):
-            # check queue 
-            if len(self.events_queue) > 0:
-                client_id, current_event, meta, data = self.events_queue.popleft()
+            if i % 10 == 0:
+                while True:
+                    # check queue
+                    if len(self.events_queue) > 0:
+                        for i in range(len(self.events_queue)):
+                            client_id, current_event, meta, data = self.events_queue.popleft()
 
-                # process event
-                if current_event == commons.UPLOAD_MODEL:
-                    self.client_upload_model_handler(client_id)
-            self.train()
+                            # process event
+                            if current_event == commons.UPLOAD_MODEL and train_res:
+                                self.client_upload_model_handler(client_id, train_res)
+                        break
+                    ## else, ping client
+            train_res = self.train()
 
+        self.stop()
         pass
 
     def deserialize_response(self, responses):
@@ -156,59 +270,49 @@ class Executor(object):
         """
         return pickle.dumps(responses)
 
-    # def event_listener(self):
-    #     """Listen to events from other clients.
-    #     """
-    #     logging.info("Start monitoring events ...")
-
-    #     while True:
-    #         # Handle queued events
-    #         if len(self.events_queue) > 0:
-    #             client_id, current_event, meta, data = self.events_queue.popleft()
-
-                
-    #             if current_event == commons.UPLOAD_MODEL:
-    #                 self.client_completion_handler(
-    #                     self.deserialize_response(data))
-    #                 if len(self.stats_util_accumulator) == self.tasks_round:
-    #                     self.round_completion_handler()
-
-    #             # TODO modify to accept testing data
-    #             elif current_event == commons.MODEL_TEST:
-    #                 self.testing_completion_handler(
-    #                     client_id, self.deserialize_response(data))
-
-    #             else:
-    #                 logging.error(f"Event {current_event} is not defined")
-
-    #         else:
-    #             # execute every 100 ms
-    #             time.sleep(0.1)
-
-    def client_upload_model_handler(self, client_id):
+    def client_upload_model_handler(self, client_id, train_res):
         """Uploads model to client at client_id.
 
         Args:
             client_id (int): The client id.
+            train_res (dictionary): The results from training.
 
         """
-        # Get client config
-        client_config = self.client_manager.get_client_config(client_id)
-
-        # Get client model
-        client_model = self.model_wrapper.get_weights()
-
-        # Serialize model
-        serialized_model = self.serialize_response(self.model_wrapper.get_weights())
-
         # Send model to client
-        future_call = self.aggregator_communicator.stub.CLIENT_EXECUTE_COMPLETION.future(
-            job_api_pb2.CompleteRequest(client_id=str(client_id), executor_id=self.executor_id,
+        future_call = self.client_communicator.stubs[client_id].CLIENT_EXECUTE_COMPLETION.future(
+            job_api_pb2.CompleteRequest(client_id=str(self.client_id), executor_id=self.executor_id,
                                         event=commons.UPLOAD_MODEL, status=True, msg=None,
                                         meta_result=None, data_result=self.serialize_response(train_res)
                                         ))
-        future_call.add_done_callback(lambda _response: self.dispatch_worker_events(_response.result()))
-    
+        future_call.add_done_callback(
+            lambda _response: self.dispatch_worker_events(_response.result()))
+
+    def init_client_manager(self, args):
+        """ Initialize client sampler
+
+        Args:
+            args (dictionary): Variable arguments for fedscale runtime config. defaults to the setup in arg_parser.py
+
+        Returns:
+            ClientManager: The client manager class
+
+        Currently we implement two client managers:
+
+        1. Random client sampler - it selects participants randomly in each round
+        [Ref]: https://arxiv.org/abs/1902.01046
+
+        2. Oort sampler
+        Oort prioritizes the use of those clients who have both data that offers the greatest utility
+        in improving model accuracy and the capability to run training quickly.
+        [Ref]: https://www.usenix.org/conference/osdi21/presentation/lai
+
+        """
+        # TODO: do only selected clients 
+        # sample_mode: random or oort
+        client_manager = ClientManager(args.sample_mode, args=args)
+
+        return client_manager
+
     def client_completion_handler(self, results):
         """We may need to keep all updates from clients,
         if so, we need to append results to the cache
@@ -221,6 +325,7 @@ class Executor(object):
         #       -results = {'client_id':client_id, 'update_weight': model_param, 'moving_loss': round_train_loss,
         #       'trained_size': count, 'wall_duration': time_cost, 'success': is_success 'utility': utility}
 
+        # TODO Check if these is necessary
         if self.args.gradient_policy in ['q-fedavg']:
             self.client_training_results.append(results)
         # Feed metrics to client sampler
@@ -232,7 +337,8 @@ class Executor(object):
                                                   results['moving_loss']),
                                               time_stamp=self.round,
                                               duration=self.virtual_client_clock[results['client_id']]['computation'] +
-                                                       self.virtual_client_clock[results['client_id']]['communication']
+                                              self.virtual_client_clock[results['client_id']
+                                                                        ]['communication']
                                               )
 
         # ================== Aggregate weights ======================
@@ -255,8 +361,131 @@ class Executor(object):
         if self._is_first_result_in_round():
             self.model_weights = update_weights
         else:
-            self.model_weights = [weight + update_weights[i] for i, weight in enumerate(self.model_weights)]
+            self.model_weights = [weight + update_weights[i]
+                                  for i, weight in enumerate(self.model_weights)]
         if self._is_last_result_in_round():
-            self.model_weights = [np.divide(weight, self.tasks_round) for weight in self.model_weights]
+            self.model_weights = [
+                np.divide(weight, self.tasks_round) for weight in self.model_weights]
             self.model_wrapper.set_weights(copy.deepcopy(self.model_weights))
 
+    def _is_first_result_in_round(self):
+        return self.model_in_update == 1
+
+    def _is_last_result_in_round(self):
+        return self.model_in_update == self.tasks_round
+    
+    def CLIENT_REGISTER(self, request, context):
+        """FL TorchClient register to the aggregator
+
+        Args:
+            request (RegisterRequest): Registeration request info from executor.
+
+        Returns:
+            ServerResponse: Server response to registeration request
+
+        """
+
+        # NOTE: client_id = executor_id in deployment,
+        # while multiple client_id uses the same executor_id (VMs) in simulations
+        executor_id = request.executor_id
+        executor_info = self.deserialize_response(request.executor_info)
+        if executor_id not in self.individual_client_events:
+            # logging.info(f"Detect new client: {executor_id}, executor info: {executor_info}")
+            self.individual_client_events[executor_id] = collections.deque()
+        else:
+            logging.info(f"Previous client: {executor_id} resumes connecting")
+
+        # We can customize whether to admit the clients here
+        self.executor_info_handler(executor_id, executor_info)
+        dummy_data = self.serialize_response(commons.DUMMY_RESPONSE)
+
+        return job_api_pb2.ServerResponse(event=commons.DUMMY_EVENT,
+                                          meta=dummy_data, data=dummy_data)
+    
+    def CLIENT_PING(self, request, context):
+        """Handle client ping requests
+
+        Args:
+            request (PingRequest): Ping request info from executor.
+
+        Returns:
+            ServerResponse: Server response to ping request
+
+        """
+        # NOTE: client_id = executor_id in deployment,
+        # while multiple client_id may use the same executor_id (VMs) in simulations
+        executor_id, client_id = request.executor_id, request.client_id
+        response_data = response_msg = commons.DUMMY_RESPONSE
+
+        if len(self.individual_client_events[executor_id]) == 0:
+            # send dummy response
+            current_event = commons.DUMMY_EVENT
+            response_data = response_msg = commons.DUMMY_RESPONSE
+        else:
+            current_event = self.individual_client_events[executor_id].popleft()
+            if current_event == commons.CLIENT_TRAIN:
+                response_msg, response_data = self.create_client_task(
+                    executor_id)
+                if response_msg is None:
+                    current_event = commons.DUMMY_EVENT
+                    if self.experiment_mode != commons.SIMULATION_MODE:
+                        self.individual_client_events[executor_id].append(
+                            commons.CLIENT_TRAIN)
+            elif current_event == commons.MODEL_TEST:
+                response_msg = self.get_test_config(client_id)
+            elif current_event == commons.UPDATE_MODEL:
+                response_data = self.model_wrapper.get_weights()
+            elif current_event == commons.SHUT_DOWN:
+                response_msg = self.get_shutdown_config(executor_id)
+
+        response_msg, response_data = self.serialize_response(
+            response_msg), self.serialize_response(response_data)
+        # NOTE: in simulation mode, response data is pickle for faster (de)serialization
+        response = job_api_pb2.ServerResponse(event=current_event,
+                                              meta=response_msg, data=response_data)
+        if current_event != commons.DUMMY_EVENT:
+            logging.info(f"Issue EVENT ({current_event}) to EXECUTOR ({executor_id})")
+
+        return response
+
+    def CLIENT_EXECUTE_COMPLETION(self, request, context):
+        """FL clients complete the execution task.
+
+        Args:
+            request (CompleteRequest): Complete request info from executor.
+
+        Returns:
+            ServerResponse: Server response to job completion request
+
+        """
+
+        executor_id, client_id, event = request.executor_id, request.client_id, request.event
+        execution_status, execution_msg = request.status, request.msg
+        meta_result, data_result = request.meta_result, request.data_result
+
+        if event == commons.CLIENT_TRAIN:
+            # Training results may be uploaded in CLIENT_EXECUTE_RESULT request later,
+            # so we need to specify whether to ask client to do so (in case of straggler/timeout in real FL).
+            if execution_status is False:
+                logging.error(f"Executor {executor_id} fails to run client {client_id}, due to {execution_msg}")
+
+            # TODO: whether we should schedule tasks when client_ping or client_complete
+            if self.resource_manager.has_next_task(executor_id):
+                # NOTE: we do not pop the train immediately in simulation mode,
+                # since the executor may run multiple clients
+                if commons.CLIENT_TRAIN not in self.individual_client_events[executor_id]:
+                    self.individual_client_events[executor_id].append(
+                        commons.CLIENT_TRAIN)
+
+        elif event in (commons.MODEL_TEST, commons.UPLOAD_MODEL):
+            self.add_event_handler(
+                executor_id, event, meta_result, data_result)
+        else:
+            logging.error(f"Received undefined event {event} from client {client_id}")
+
+        return self.CLIENT_PING(request, context)
+
+
+if __name__ == "__main__":
+    executor = Executor(parser.args)
+    executor.run()
