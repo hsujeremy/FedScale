@@ -4,28 +4,29 @@ import math
 import random
 import threading
 import time
-import grpc
-
 from concurrent import futures
 from random import Random
 
+import grpc
 import numpy as np
 import torch
 import wandb
 
+import fedscale.cloud.channels.job_api_pb2 as job_api_pb2
+import fedscale.cloud.channels.job_api_pb2_grpc as job_api_pb2_grpc
 import fedscale.cloud.logger.executor_logging as logger
 from fedscale.cloud.aggregation.optimizers import TorchServerOptimizer
 from fedscale.cloud.client_manager import ClientManager
-from fedscale.cloud.internal.tensorflow_model_adapter import TensorflowModelAdapter
-from fedscale.cloud.internal.torch_model_adapter import TorchModelAdapter
-import fedscale.cloud.channels.job_api_pb2_grpc as job_api_pb2_grpc
-import fedscale.cloud.channels.job_api_pb2 as job_api_pb2
-from fedscale.cloud.gossip.gossip_channel_context import ClientConnections
 from fedscale.cloud.execution.data_processor import collate, voice_collate_fn
+from fedscale.cloud.execution.rl_client import RLClient
+from fedscale.cloud.execution.tensorflow_client import TensorflowClient
 from fedscale.cloud.execution.torch_client import TorchClient
 from fedscale.cloud.fllibs import *
+from fedscale.cloud.gossip.gossip_channel_context import ClientConnections
+from fedscale.cloud.internal.tensorflow_model_adapter import \
+    TensorflowModelAdapter
+from fedscale.cloud.internal.torch_model_adapter import TorchModelAdapter
 from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
-
 
 """
 Make a server for each client 
@@ -43,8 +44,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         # init model weights here? training config contains model weights under "model"
         # model weights are stored under self.model_adapter.get_weights
-        self.client = TorchClient(args)
-        self.model_adapter = self.client.get_model_adapter(init_model())
+        self.model_adapter = self.get_client_trainer(
+            args).get_model_adapter(init_model())
 
         self.args = args
         self.num_executors = args.num_executors
@@ -127,6 +128,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.grpc_server.start()
         self.client_communicator.connect_to_server()
 
+    # TODO Figure out diff between adapter vs client and init_model vs get_client_trainer
     def init_model(self):
         """Initialize the model"""
         if self.args.engine == commons.TENSORFLOW:
@@ -139,6 +141,21 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         else:
             raise ValueError(f"{self.args.engine} is not a supported engine.")
         self.model_weights = self.model_wrapper.get_weights()
+
+    def get_client_trainer(self, conf):
+        """
+        Returns a framework-specific client that handles training and evaluation.
+        :param conf: job config
+        :return: framework-specific client instance
+        """
+        if conf.engine == commons.TENSORFLOW:
+            return TensorflowClient(conf)
+        elif conf.engine == commons.PYTORCH:
+            if conf.task == 'rl':
+                return RLClient(conf)
+            else:
+                return TorchClient(conf)
+        raise "Currently, FedScale supports tensorflow and pytorch."
 
     def setup_env(self, seed=1):
         """Set up experiments environment
@@ -232,7 +249,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                            batch_size=conf.batch_size, args=self.args,
                            collate_fn=self.collate_fn
                            )
-        train_res = self.client.train(
+        
+        # TODO figure out if current trainer handles set number of iterations at a time
+        train_res = self.get_client_trainer(self.args).train(
             client_data=client_data, model=self.model_adapter.get_model(), conf=conf)
 
         return train_res
