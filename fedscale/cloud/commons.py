@@ -14,6 +14,10 @@ CLIENT_TRAIN = 'client_train'
 DUMMY_EVENT = 'dummy_event'
 UPLOAD_MODEL = 'upload_model'
 
+# Define Basic GL Events
+GL_REQUEST_WEIGHTS = "request_weights"
+GL_SEND_WEIGHTS = "send_weights"
+
 # PLACEHOLD
 DUMMY_RESPONSE = 'N'
 
