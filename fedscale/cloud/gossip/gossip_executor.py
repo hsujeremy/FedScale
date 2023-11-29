@@ -32,8 +32,6 @@ Make a server for each client
 """
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
 
-# TODO: implement CLIENT_REGISTER, CLIENT_PING, CLIENT_EXECUTE_COMPLETION
-
 
 class Executor(job_api_pb2_grpc.JobServiceServicer):
     def __init__(self, args, num_iterations=100, client_id=0, ports=10):
@@ -51,7 +49,11 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.args = args
         self.num_executors = args.num_executors
 
-        # ======== Event Queue =======
+        # ======== Env Information ========
+        self.this_rank = args.this_rank
+        self.executor_id = str(self.this_rank)
+
+        # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
         self.events_queue = collections.deque()
 
@@ -253,8 +255,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         for i in range(self.num_iterations):
             if i % 10 == 0:
                 # TODO after a set number of iterations (e.g. 10), request weights from clients
-                
-                while True:
+
+                # Wait for neighbors to send back weights
+                while self.model_in_update < self.tasks_round:
                     # check queue
                     while self.events_queue:
                         client_id, current_event, meta, data = self.events_queue.popleft()
@@ -262,6 +265,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                         # process event
                         if current_event == commons.GL_SEND_WEIGHTS:
                             self.client_completion_handler(data)
+
+                    # execute every 100 ms
+                    time.sleep(0.1)
 
             # check queue
             while self.events_queue:
@@ -387,6 +393,43 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.update_lock.release()
 
+    def report_executor_info_handler(self):
+        """Return the statistics of training dataset
+
+        Returns:
+            int: Return the statistics of training dataset, in simulation return the number of clients
+
+        """
+        return self.training_sets.getSize()
+
+    def executor_info_handler(self, executorId, info):
+        """Handler for register executor info and it will start the round after number of
+        executor reaches requirement.
+
+        Args:
+            executorId (int): Executor Id
+            info (dictionary): Executor information
+
+        """
+        # TODO Figure out how much of this logic we actually need
+        self.registered_executor_info.add(executorId)
+        logging.info(
+            f"Received executor {executorId} information, {len(self.registered_executor_info)}/{len(self.executors)}")
+
+        # In this simulation, we run data split on each worker, so collecting info from one executor is enough
+        # Waiting for data information from executors, or timeout
+        if self.experiment_mode == commons.SIMULATION_MODE:
+
+            if len(self.registered_executor_info) == len(self.executors):
+                self.client_register_handler(executorId, info)
+                # start to sample clients
+                self.round_completion_handler()
+        else:
+            # In real deployments, we need to register for each client
+            self.client_register_handler(executorId, info)
+            if len(self.registered_executor_info) == len(self.executors):
+                self.round_completion_handler()
+
     def update_weight_aggregation(self, results):
         """Updates the aggregation with the new results.
 
@@ -413,7 +456,28 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
     def _is_last_result_in_round(self):
         return self.model_in_update == self.tasks_round
 
-    # TODO Determine if we need this handler
+    def client_register(self):
+        """Register the executor information to the aggregator
+        """
+        start_time = time.time()
+        for stub in self.client_communicator.stubs:
+            while time.time() - start_time < 180:
+                try:
+                    response = stub.CLIENT_REGISTER(
+                        job_api_pb2.RegisterRequest(
+                            client_id=self.executor_id,
+                            executor_id=self.executor_id,
+                            executor_info=self.serialize_response(
+                                self.report_executor_info_handler())
+                        )
+                    )
+                    self.dispatch_worker_events(response)
+                    break
+                except Exception as e:
+                    logging.warning(
+                        f"Failed to connect to aggregator {e}. Will retry in 5 sec.")
+                    time.sleep(5)
+
     def CLIENT_REGISTER(self, request, context):
         """FL TorchClient register to the aggregator
 
