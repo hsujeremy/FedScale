@@ -193,6 +193,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         return clients_online[:client_len]
 
     def train(self, config):
+        # TODO should deal with a set number of iterations at a time
 
         # few batches
         # for i in range(10):
@@ -249,17 +250,27 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         # TODO fix how training works
         # Should train a few batches at a time and check for intermitent events between
-        # After a set number of iterations (e.g. 10), request weights from clients
         for i in range(self.num_iterations):
             if i % 10 == 0:
-                # check queue
-                while self.events_queue:
-                    client_id, current_event, meta, data = self.events_queue.popleft()
+                # TODO after a set number of iterations (e.g. 10), request weights from clients
+                
+                while True:
+                    # check queue
+                    while self.events_queue:
+                        client_id, current_event, meta, data = self.events_queue.popleft()
 
-                    # process event
-                    if current_event == commons.GL_SEND_WEIGHTS and train_res:
-                        self.client_send_weights_handler(
-                            client_id, train_res)
+                        # process event
+                        if current_event == commons.GL_SEND_WEIGHTS:
+                            self.client_completion_handler(data)
+
+            # check queue
+            while self.events_queue:
+                client_id, current_event, meta, data = self.events_queue.popleft()
+
+                # process event
+                if current_event == commons.GL_REQUEST_WEIGHTS and train_res:
+                    self.client_send_weights_handler(
+                        client_id, train_res)
             train_res = self.train()
 
         self.stop()
@@ -499,7 +510,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         if event == commons.GL_SEND_WEIGHTS:
             # TODO prob not right, need to fix by adding to a queue or something
-            self.client_completion_handler(data_result)
+            self.dispatch_worker_events(request)
         else:
             logging.error(
                 f"Received undefined event {event} from client {client_id}")
