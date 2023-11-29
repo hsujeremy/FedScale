@@ -463,23 +463,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         execution_status, execution_msg = request.status, request.msg
         meta_result, data_result = request.meta_result, request.data_result
 
-        if event == commons.CLIENT_TRAIN:
-            # Training results may be uploaded in CLIENT_EXECUTE_RESULT request later,
-            # so we need to specify whether to ask client to do so (in case of straggler/timeout in real FL).
-            if execution_status is False:
-                logging.error(f"Executor {executor_id} fails to run client {client_id}, due to {execution_msg}")
-
-            # TODO: whether we should schedule tasks when client_ping or client_complete
-            if self.resource_manager.has_next_task(executor_id):
-                # NOTE: we do not pop the train immediately in simulation mode,
-                # since the executor may run multiple clients
-                if commons.CLIENT_TRAIN not in self.individual_client_events[executor_id]:
-                    self.individual_client_events[executor_id].append(
-                        commons.CLIENT_TRAIN)
-
-        elif event in (commons.MODEL_TEST, commons.UPLOAD_MODEL):
-            self.add_event_handler(
-                executor_id, event, meta_result, data_result)
+        if event == commons.UPLOAD_MODEL:
+            # TODO prob not right, need to fix by adding to a queue or something
+            self.client_completion_handler(data_result)
         else:
             logging.error(f"Received undefined event {event} from client {client_id}")
 
