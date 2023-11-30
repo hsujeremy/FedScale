@@ -50,6 +50,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.args = args
         self.num_executors = args.num_executors
+        
+        self.num_neighbors = 0
+        self.neighbor_threshold = 0.7
+        self.model_updates_threshold = 0.7
 
         # ======== Env Information ========
         self.this_rank = args.this_rank
@@ -215,28 +219,21 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         client_len = min(min_replies * buffer_factor, len(clients_online)-1)
         return clients_online[:client_len]
 
-    def train(self, config):
+    def train(self):
 
         # TODO should deal with a set number of iterations at a time
         # config is usually passed as a message, but config can be a set 
         # dict each time 
 
-        # few batches
-        # for i in range(10):
-        #     response = self.client_communicator.stubs[client_id].CLIENT_EXECUTE_COMPLETION(
-        #         job_api_pb2.CompleteRequest(
-        #             client_id=str(client_id), executor_id=self.executor_id,
-        #             event=commons.CLIENT_TRAIN, status=True, msg=None,
-        #             meta_result=None, data_result=None
-        #         )
-        #     )
-        # client_id, train_config = config['client_id'], config['task_config']
-        # assert 'model' in config
-        # train_res = self.training_handler(
-        #     client_id=client_id, conf=train_config, model=config['model'])
+        train_config = {
+            'learning_rate': self.args.learning_rate,
+        }
+        client_conf = self.override_conf(train_config)
+        train_res = self.training_handler(
+            client_id=self.client_id, conf=client_conf, model=self.model)
 
         # use torchclient trainer
-        pass
+        return train_res
 
     def training_handler(self, conf, model):
         """Train model given client id
@@ -274,15 +271,18 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.init_model()
 
         self.training_sets, self.testing_sets = self.init_data()
-        train_res = None
+        weights = None
 
         # TODO fix how training works
         # Should train a few batches at a time and check for intermitent events between
+        
+        # TODO (jeremy): implement retries
         for i in range(self.num_iterations):
             if i > 0 and i % 10 == 0: 
                 # TODO after a set number of iterations (e.g. 10), request weights from clients
                 # TODO: in the case of error 
-                neighbors = self.select_neighbors(min_replies=0.7)
+                neighbors = self.select_neighbors(min_replies=self.neighbor_threshold)
+                self.num_neighbors = len(neighbors)
                 counter = 0 
                 while True:
                     # get stubs from client communicator 
@@ -304,7 +304,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
                 # Wait for neighbors to send back weights
                 logging.info(f"Client {self.client_id} waiting to receive weights...")
-                while len(self.receive_events_queue) < int(0.5 * len(neighbors)):
+                while len(self.receive_events_queue) < int(self.model_updates_threshold * self.num_neighbors):
                     time.sleep(0.1)
     
                 logging.info(f"Client {self.client_id} aggregating weights...")
@@ -320,12 +320,12 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             # check queue
             # if we have any requests to send out weights 
             while self.send_events_queue:
-                client_id, current_event, meta, data = self.send_events_queue.popleft()
+                client_id, meta, data = self.send_events_queue.popleft()
                 # process event
-                if current_event == commons.GL_REQUEST_WEIGHTS and train_res:
+                if weights:
                     self.client_send_weights_handler(
-                        client_id, train_res)
-            train_res = self.train()
+                        client_id, weights)
+            weights = self.train()["update_weight"]
 
         self.stop()
         pass
@@ -450,43 +450,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.update_lock.release()
 
-    def report_executor_info_handler(self):
-        """Return the statistics of training dataset
-
-        Returns:
-            int: Return the statistics of training dataset, in simulation return the number of clients
-
-        """
-        return self.training_sets.getSize()
-
-    def executor_info_handler(self, executorId, info):
-        """Handler for register executor info and it will start the round after number of
-        executor reaches requirement.
-
-        Args:
-            executorId (int): Executor Id
-            info (dictionary): Executor information
-
-        """
-        # TODO Figure out how much of this logic we actually need
-        self.registered_executor_info.add(executorId)
-        logging.info(
-            f"Received executor {executorId} information, {len(self.registered_executor_info)}/{len(self.executors)}")
-
-        # In this simulation, we run data split on each worker, so collecting info from one executor is enough
-        # Waiting for data information from executors, or timeout
-        if self.experiment_mode == commons.SIMULATION_MODE:
-
-            if len(self.registered_executor_info) == len(self.executors):
-                self.client_register_handler(executorId, info)
-                # start to sample clients
-                self.round_completion_handler()
-        else:
-            # In real deployments, we need to register for each client
-            self.client_register_handler(executorId, info)
-            if len(self.registered_executor_info) == len(self.executors):
-                self.round_completion_handler()
-
     def update_weight_aggregation(self, weights):
         """Updates the aggregation with weights received from neighbor.
 
@@ -498,16 +461,83 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.model_weights = list(
             map(lambda x, y: x+y, self.model_weights, weights))
         if self._is_last_result_in_round():
-            # TODO determine how to calculate self.tasks_round
             self.model_weights = list(
-                map(lambda x: x/self.tasks_round, self.model_weights))
+                map(lambda x: x/int(self.num_neighbors * self.model_updates_threshold), self.model_weights))
             self.model_wrapper.set_weights(copy.deepcopy(self.model_weights))
 
     def _is_last_result_in_round(self):
-        return self.model_in_update == self.tasks_round
+        return self.model_in_update == int(self.num_neighbors * self.model_updates_threshold)
+
+    def report_executor_info_handler(self):
+        """Return the statistics of training dataset
+
+        Returns:
+            int: Return the statistics of training dataset, in simulation return the number of clients
+
+        """
+        return self.training_sets.getSize()
+
+    def executor_info_handler(self, executor_id, info):
+        """Handler for register executor info and it will start the round after number of
+        executor reaches requirement.
+
+        Args:
+            executor_id (int): Executor Id
+            info (dictionary): Executor information
+
+        """
+        # TODO Figure out how much of this logic we actually need
+        self.registered_executor_info.add(executor_id)
+        logging.info(
+            f"Received executor {executor_id} information, {len(self.registered_executor_info)}/{len(self.executors)}")
+
+        # In this simulation, we run data split on each worker, so collecting info from one executor is enough
+        # Waiting for data information from executors, or timeout
+        if self.experiment_mode == commons.SIMULATION_MODE:
+            if len(self.registered_executor_info) == len(self.executors):
+                self.client_register_handler(executor_id, info)
+                # start to sample clients
+                self.round_completion_handler()
+        else:
+            # In real deployments, we need to register for each client
+            self.client_register_handler(executor_id, info)
+            if len(self.registered_executor_info) == len(self.executors):
+                self.round_completion_handler()
+
+    def client_register_handler(self, executor_id, info):
+        """Triggered once receive new executor registration.
+
+        Args:
+            executor_id (int): Executor Id
+            info (dictionary): Executor information
+
+        """
+        logging.info(f"Loading {len(info['size'])} client traces ...")
+        for _size in info['size']:
+            # since the worker rankId starts from 1, we also configure the initial dataId as 1
+            mapped_id = (self.num_of_clients + 1) % len(
+                self.client_profiles) if len(self.client_profiles) > 0 else 1
+            systemProfile = self.client_profiles.get(
+                mapped_id, {'computation': 1.0, 'communication': 1.0})
+
+            client_id = (
+                    self.num_of_clients + 1) if self.experiment_mode == commons.SIMULATION_MODE else executor_id
+            self.client_manager.register_client(
+                executor_id, client_id, size=_size, speed=systemProfile)
+            self.client_manager.registerDuration(
+                client_id,
+                batch_size=self.args.batch_size,
+                local_steps=self.args.local_steps,
+                upload_size=self.model_update_size,
+                download_size=self.model_update_size
+            )
+            self.num_of_clients += 1
+
+        logging.info("Info of all feasible clients {}".format(
+            self.client_manager.getDataInfo()))
 
     def client_register(self):
-        """Register the executor information to the aggregator
+        """Register the client information to neighbors
         """
         start_time = time.time()
         for stub in self.client_communicator.stubs:
