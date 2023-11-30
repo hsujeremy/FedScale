@@ -1,5 +1,7 @@
+from argparse import Namespace
 import collections
 import copy
+import gc
 import math
 import random
 import threading
@@ -67,6 +69,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             'cpu')
         # ======== Env Information ========
         self.this_rank = args.this_rank
+        self.global_virtual_clock = 0.
 
         # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
@@ -208,7 +211,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     # TODO: maybe change variable names later since we're not including the model
     # weights in the RPC reply
-    def select_neighbors(self, min_replies, buffer_factor=1):
+    def select_neighbors(self, min_replies, cur_time=0, buffer_factor=2):
         """Randomly select neighbors to request weights from.
 
         TODO: handle edge cases:
@@ -231,6 +234,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         num_neighbors = int(len(candidates) * min_replies * buffer_factor)
         return candidates[:num_neighbors]
 
+    # TODO: figure out what this actually does
     def override_conf(self, config):
         """ Override the variable arguments for different client
 
@@ -247,6 +251,65 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             default_conf[key] = config[key]
 
         return Namespace(**default_conf)
+
+    def test(self, config):
+        """Model Testing. By default, we test the accuracy on all data of clients in the test group
+
+        Args:
+            config (dictionary): The client testing config.
+        """
+        self.testing_handler()
+
+    def testing_handler(self):
+        """Test model
+
+        Args:
+            args (dictionary): Variable arguments for fedscale runtime config. defaults to the setup in arg_parser.py
+            config (dictionary): Variable arguments from coordinator.
+
+        Returns:
+            dictionary: The test result
+        """
+        test_config = self.override_conf({
+            'rank': self.this_rank,
+            'memory_capacity': self.args.memory_capacity,
+            'tokenizer': tokenizer
+        })
+        client = self.get_client_trainer(test_config)
+        model = self.model_adapter.get_model()
+        data_loader = select_dataset(self.this_rank, self.testing_sets,
+                                     batch_size=self.args.test_bsz, args=self.args,
+                                     isTest=True, collate_fn=self.collate_fn)
+
+        test_results = client.test(data_loader, model, test_config)
+        self.log_test_result(test_results)
+        gc.collect()
+
+        return test_results
+
+    def log_test_result(self, test_res):
+        """Log test results to wandb server if enabled
+
+        Args:
+            test_res (dictionary): The test result with top_1, top_5, test_loss, and test_len keys
+        """
+        acc = round(test_res["top_1"] / test_res["test_len"], 4)
+        acc_5 = round(test_res["top_5"] / test_res["test_len"], 4)
+        test_loss = test_res["test_loss"] / test_res["test_len"]
+        if self.wandb != None:
+            # Reporting metrics relative to round
+            self.wandb.log({
+                'Test/round_to_top1_accuracy': acc,
+                'Test/round_to_top5_accuracy': acc_5,
+                'Test/round_to_loss': test_loss,
+            }, step=self.round)
+
+            # Reporting metrics relative to total time
+            self.wandb.log({
+                'Test/time_to_top1_accuracy': acc,
+                'Test/time_to_top5_accuracy': acc_5,
+                'Test/time_to_loss': test_loss,
+            }, step=self.global_virtual_clock/60)
 
     def train(self):
         train_config = {
@@ -287,6 +350,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
     def train_and_monitor(self):
         weights = None
         for i in range(self.num_iterations):
+            round_start_time = time.time()
             if self.received_stop_request:
                 break
 
@@ -341,6 +405,12 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             logging.info(
                 f"Training iteration {i + 1} of {self.num_iterations}")
             weights = self.train()["update_weight"]
+
+            # Run test/evaluation on the model after trainig round
+            self.global_virtual_clock += time.time() - round_start_time
+            self.test(config=None)
+            # Reset round start time after testing is complete
+            round_start_time = time.time()
 
     def run(self):
         """
