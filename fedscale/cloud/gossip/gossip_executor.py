@@ -1,5 +1,7 @@
+from argparse import Namespace
 import collections
 import copy
+import gc
 import math
 import random
 import threading
@@ -58,6 +60,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         # ======== Env Information ========
         self.this_rank = args.this_rank
         self.executor_id = str(self.this_rank)
+        self.global_virtual_clock = 0.
 
         # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
@@ -219,6 +222,83 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         client_len = min(min_replies * buffer_factor, len(clients_online)-1)
         return clients_online[:client_len]
 
+    # TODO: figure out what this actually does
+    def override_conf(self, config):
+        """ Override the variable arguments for different client
+
+        Args:
+            config (dictionary): The client runtime config.
+
+        Returns:
+            dictionary: Variable arguments for client runtime config.
+
+        """
+        default_conf = vars(self.args).copy()
+
+        for key in config:
+            default_conf[key] = config[key]
+
+        return Namespace(**default_conf)
+
+    def test(self, config):
+        """Model Testing. By default, we test the accuracy on all data of clients in the test group
+
+        Args:
+            config (dictionary): The client testing config.
+        """
+        self.testing_handler()
+
+    def testing_handler(self):
+        """Test model
+
+        Args:
+            args (dictionary): Variable arguments for fedscale runtime config. defaults to the setup in arg_parser.py
+            config (dictionary): Variable arguments from coordinator.
+
+        Returns:
+            dictionary: The test result
+        """
+        test_config = self.override_conf({
+            'rank': self.this_rank,
+            'memory_capacity': self.args.memory_capacity,
+            'tokenizer': tokenizer
+        })
+        client = self.get_client_trainer(test_config)
+        model = self.model_adapter.get_model()
+        data_loader = select_dataset(self.this_rank, self.testing_sets,
+                                     batch_size=self.args.test_bsz, args=self.args,
+                                     isTest=True, collate_fn=self.collate_fn)
+
+        test_results = client.test(data_loader, model, test_config)
+        self.log_test_result(test_results)
+        gc.collect()
+
+        return test_results
+
+    def log_test_result(self, test_res):
+        """Log test results to wandb server if enabled
+
+        Args:
+            test_res (dictionary): The test result with top_1, top_5, test_loss, and test_len keys
+        """
+        acc = round(test_res["top_1"] / test_res["test_len"], 4)
+        acc_5 = round(test_res["top_5"] / test_res["test_len"], 4)
+        test_loss = test_res["test_loss"] / test_res["test_len"]
+        if self.wandb != None:
+            # Reporting metrics relative to round
+            self.wandb.log({
+                'Test/round_to_top1_accuracy': acc,
+                'Test/round_to_top5_accuracy': acc_5,
+                'Test/round_to_loss': test_loss,
+            }, step=self.round)
+
+            # Reporting metrics relative to total time
+            self.wandb.log({
+                'Test/time_to_top1_accuracy': acc,
+                'Test/time_to_top5_accuracy': acc_5,
+                'Test/time_to_loss': test_loss,
+            }, step=self.global_virtual_clock/60)
+
     def train(self):
 
         # TODO should deal with a set number of iterations at a time
@@ -272,6 +352,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.training_sets, self.testing_sets = self.init_data()
         weights = None
+        round_start_time = time.time()
 
         # TODO fix how training works
         # Should train a few batches at a time and check for intermitent events between
@@ -316,6 +397,11 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                     # process event
                     self.client_completion_handler(weights)
 
+                # Run test/evaluation on the model after trainig round
+                self.global_virtual_clock += time.time() - round_start_time
+                self.test(config=None)
+                # Reset round start time after testing is complete
+                round_start_time = time.time()
 
             # check queue
             # if we have any requests to send out weights 
