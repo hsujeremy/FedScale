@@ -42,8 +42,8 @@ parser.add_argument('--device_conf_file', type=str, default='/tmp/client.cfg')
 parser.add_argument('--model', type=str, default='shufflenet_v2_x2_0')
 parser.add_argument('--data_set', type=str, default='cifar10')
 parser.add_argument('--sample_mode', type=str, default='random')
-parser.add_argument('--filter_less', type=int, default=32)
-parser.add_argument('--filter_more', type=int, default=1e15)
+parser.add_argument('--filter_less', "-fl", type=int, default=32)
+parser.add_argument('--filter_more', "-fm", type=int, default=1e15)
 parser.add_argument('--train_uniform', type=bool, default=False)
 parser.add_argument('--conf_path', type=str, default='~/dataset/')
 parser.add_argument('--overcommitment', type=float, default=1.3)
@@ -198,7 +198,7 @@ parser.add_argument('--hidden-layers', default=7,
                     type=int, help='Number of RNN layers')
 parser.add_argument('--rnn-type', default='lstm',
                     help='Type of the RNN. rnn|gru|lstm are supported')
-parser.add_argument('--finetune', dest='finetune', action='store_true',
+parser.add_argument('--finetune', "-ft", dest='finetune', action='store_true',
                     help='Finetune the model from checkpoint "continue_from"')
 parser.add_argument('--speed-volume-perturb', dest='speed_volume_perturb', action='store_true',
                     help='Use random tempo and gain perturbations.')

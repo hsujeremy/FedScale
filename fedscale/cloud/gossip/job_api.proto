@@ -9,6 +9,8 @@ service JobService {
     rpc CLIENT_REGISTER (RegisterRequest) returns (ServerResponse) {}
     rpc CLIENT_PING (PingRequest) returns (ServerResponse) {}
     rpc CLIENT_EXECUTE_COMPLETION (CompleteRequest) returns (ServerResponse) {}
+    rpc REQUEST_WEIGHTS (WeightRequest) returns (ServerResponse) {}
+    rpc UPLOAD_WEIGHTS (UploadWeightRequest) returns (ServerResponse) {}
 }
 
 message ServerResponse {
@@ -36,4 +38,15 @@ message CompleteRequest {
     string msg = 5;
     string meta_result = 6;
     bytes data_result = 7;
+}
+
+message UploadWeightRequest {
+    string client_id = 1;
+    string executor_id = 2;
+    bytes weights = 3;
+}
+
+message WeightRequest {
+    string client_id = 1;
+    string executor_id = 2;
 }

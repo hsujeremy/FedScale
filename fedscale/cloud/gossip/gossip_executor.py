@@ -39,6 +39,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.num_iterations = num_iterations
         self.model = None
         self.client_id = client_id
+        self.executor_id = client_id
 
         self.training_sets = self.test_dataset = None
 
@@ -56,8 +57,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
-        self.events_queue = collections.deque()
-
+        self.receive_events_queue = collections.deque()
+        self.send_events_queue = collections.deque()
         # ======== Model and Data ========
         self.training_sets = self.test_dataset = None
         self.model_wrapper = None
@@ -94,6 +95,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         else:
             self.wandb = None
+
+        # TODO: register neighbors 
         super(Executor, self).__init__()
 
     def init_control_communication(self):
@@ -140,7 +143,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                     self.args.gradient_policy, self.args, self.device))
         else:
             raise ValueError(f"{self.args.engine} is not a supported engine.")
-        self.model_weights = self.model_wrapper.get_weights()
 
     def get_client_trainer(self, conf):
         """
@@ -197,7 +199,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         return training_sets, testing_sets
 
-    def select_neighbors(self, cur_time, min_replies, buffer_factor=2):
+    # TODO: maybe change variable names later since we're no including the model
+    # weights in the RPC reply
+    def select_neighbors(self, min_replies, cur_time=0, buffer_factor=2):
         """Randomly select neighbors to request weights from. This should be
         some order of magnitude higher than the minimum amount of clients we
         want to receive weight updates from (e.g., if we want at least 5
@@ -212,7 +216,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         return clients_online[:client_len]
 
     def train(self, config):
+
         # TODO should deal with a set number of iterations at a time
+        # config is usually passed as a message, but config can be a set 
+        # dict each time 
 
         # few batches
         # for i in range(10):
@@ -272,26 +279,48 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         # TODO fix how training works
         # Should train a few batches at a time and check for intermitent events between
         for i in range(self.num_iterations):
-            if i % 10 == 0:
+            if i > 0 and i % 10 == 0: 
                 # TODO after a set number of iterations (e.g. 10), request weights from clients
+                # TODO: in the case of error 
+                neighbors = self.select_neighbors(min_replies=0.7)
+                counter = 0 
+                while True:
+                    # get stubs from client communicator 
+                    for neighbor in neighbors:
+                        stub = self.client_communicator.stubs[neighbor]
+                        res = stub.REQUEST_WEIGHTS(
+                            job_api_pb2.WeightRequest(
+                                client_id=f"{self.client_id}",
+                                executor_id=f"{self.executor_id}"
+                            )
+                        )
+
+                        res_client_id = res.client_id
+                        res_exeuctor_id = res.executor_id
+                        # TODO: check for error
+                        counter += 1                        
+                    if counter >= len(neighbors):
+                        break
 
                 # Wait for neighbors to send back weights
-                while self.model_in_update < self.tasks_round:
-                    # check queue
-                    while self.events_queue:
-                        client_id, current_event, meta, data = self.events_queue.popleft()
-
-                        # process event
-                        if current_event == commons.GL_SEND_WEIGHTS:
-                            self.client_completion_handler(data)
-
-                    # execute every 100 ms
+                logging.info(f"Client {self.client_id} waiting to receive weights...")
+                while len(self.receive_events_queue) < int(0.5 * len(neighbors)):
                     time.sleep(0.1)
+    
+                logging.info(f"Client {self.client_id} aggregating weights...")
+                self.model_weights = self.model_wrapper.get_weights()
+                # check queue
+                while self.receive_events_queue:
+                    client_id, executor_id, weights = self.receive_events_queue.popleft()
+
+                    # process event
+                    self.client_completion_handler(weights)
+
 
             # check queue
-            while self.events_queue:
-                client_id, current_event, meta, data = self.events_queue.popleft()
-
+            # if we have any requests to send out weights 
+            while self.send_events_queue:
+                client_id, current_event, meta, data = self.send_events_queue.popleft()
                 # process event
                 if current_event == commons.GL_REQUEST_WEIGHTS and train_res:
                     self.client_send_weights_handler(
@@ -333,22 +362,31 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         """
         # Send model to client
-        future_call = self.client_communicator.stubs[client_id].CLIENT_EXECUTE_COMPLETION.future(
-            job_api_pb2.CompleteRequest(client_id=str(self.client_id), executor_id=self.executor_id,
-                                        event=commons.GL_SEND_WEIGHTS, status=True, msg=None,
-                                        meta_result=None, data_result=self.serialize_response(train_res)
+        future_call = self.client_communicator.stubs[client_id].UPLOAD_WEIGHTS.future(
+            job_api_pb2.UploadWeightRequest(client_id=str(self.client_id),
+                                            executor_id=self.executor_id,
+                                            weights=self.serialize_response(train_res)
                                         ))
         future_call.add_done_callback(
             lambda _response: self.dispatch_worker_events(_response.result()))
 
-    def dispatch_worker_events(self, request):
-        """Add new events to worker queues
+    def dispatch_receive_events(self, request):
+        """Add new events to worker queue for sending out weights.
+        
+        Args:
+            request (string): Add grpc request from server (e.g. MODEL_TEST, MODEL_TRAIN) to events_queue.
+
+        """
+        self.receive_events_queue.append(request)
+
+    def dispatch_send_events(self, request):
+        """Add new events to worker queue for receiving weights.
 
         Args:
             request (string): Add grpc request from server (e.g. MODEL_TEST, MODEL_TRAIN) to events_queue.
 
         """
-        self.events_queue.append(request)
+        self.send_events_queue.append(request)
 
     def init_client_manager(self, args):
         """ Initialize client sampler
@@ -376,7 +414,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         return client_manager
 
-    def client_completion_handler(self, results):
+    def client_completion_handler(self, weights):
         """We may need to keep all updates from clients,
         if so, we need to append results to the cache
 
@@ -408,7 +446,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.update_lock.acquire()
 
         self.model_in_update += 1
-        self.update_weight_aggregation(results)
+        self.update_weight_aggregation(weights)
 
         self.update_lock.release()
 
@@ -449,28 +487,21 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             if len(self.registered_executor_info) == len(self.executors):
                 self.round_completion_handler()
 
-    def update_weight_aggregation(self, results):
-        """Updates the aggregation with the new results.
+    def update_weight_aggregation(self, weights):
+        """Updates the aggregation with weights received from neighbor.
 
         Args:
-            results (dict): The results from a client.        
+            weights (list): The weights received from neighbor.      
         """
-        update_weights = results['update_weight']
-        if type(update_weights) is dict:
-            update_weights = [x for x in update_weights.values()]
-        if self._is_first_result_in_round():
-            self.model_weights = update_weights
-        else:
-            self.model_weights = list(
-                map(lambda x, y: x+y, self.model_weights, update_weights))
+        if type(weights) is dict:
+            weights = [x for x in weights.values()]
+        self.model_weights = list(
+            map(lambda x, y: x+y, self.model_weights, weights))
         if self._is_last_result_in_round():
             # TODO determine how to calculate self.tasks_round
             self.model_weights = list(
                 map(lambda x: x/self.tasks_round, self.model_weights))
             self.model_wrapper.set_weights(copy.deepcopy(self.model_weights))
-
-    def _is_first_result_in_round(self):
-        return self.model_in_update == 1
 
     def _is_last_result_in_round(self):
         return self.model_in_update == self.tasks_round
@@ -507,7 +538,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             ServerResponse: Server response to registeration request
 
         """
-
+        pass
         # NOTE: client_id = executor_id in deployment,
         # while multiple client_id uses the same executor_id (VMs) in simulations
         executor_id = request.executor_id
@@ -525,80 +556,47 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         return job_api_pb2.ServerResponse(event=commons.DUMMY_EVENT,
                                           meta=dummy_data, data=dummy_data)
 
-    def CLIENT_PING(self, request, context):
-        """Handle client ping requests
+    def REQUEST_WEIGHTS(self, request, context):
+        """Handle incoming requests for model weights.
+
+        Should send back a response to the sender immediately, but then submit
+        an internal queue "request" to send the weights to the sender via the
+        UploadWeights RPC. 
 
         Args:
-            request (PingRequest): Ping request info from executor.
+            request (WeightRequest): Ping request info from neighbor.
 
         Returns:
-            ServerResponse: Server response to ping request
+            ServerResponse: Server response to weight request
 
         """
-        # NOTE: client_id = executor_id in deployment,
-        # while multiple client_id may use the same executor_id (VMs) in simulations
-        executor_id, client_id = request.executor_id, request.client_id
-        response_data = response_msg = commons.DUMMY_RESPONSE
-
-        if len(self.individual_client_events[executor_id]) == 0:
-            # send dummy response
-            current_event = commons.DUMMY_EVENT
-            response_data = response_msg = commons.DUMMY_RESPONSE
-        else:
-            current_event = self.individual_client_events[executor_id].popleft(
-            )
-            if current_event == commons.GL_REQUEST_WEIGHTS:
-                # TODO check if it makes more sense to use add_event_handler
-                self.dispatch_worker_events(request)
-                response_msg = self.get_requst_config(executor_id)
-
-                # IDK what this logic is for
-                # ====================== #
-                if response_msg is None:
-                    current_event = commons.DUMMY_EVENT
-                    if self.experiment_mode != commons.SIMULATION_MODE:
-                        self.individual_client_events[executor_id].append(
-                            commons.CLIENT_TRAIN)
-                # ====================== #
-            elif current_event == commons.MODEL_TEST:
-                response_msg = self.get_test_config(client_id)
-            elif current_event == commons.SHUT_DOWN:
-                response_msg = self.get_shutdown_config(executor_id)
-
-        response_msg, response_data = self.serialize_response(
-            response_msg), self.serialize_response(response_data)
-        # NOTE: in simulation mode, response data is pickle for faster (de)serialization
-        response = job_api_pb2.ServerResponse(event=current_event,
+        self.dispatch_send_events(request)
+        
+        event = commons.GL_ACK
+        response_data = response_msg = commons.GL_ACK_RESPONSE
+        response = job_api_pb2.ServerResponse(event=event,
                                               meta=response_msg, data=response_data)
-        if current_event != commons.DUMMY_EVENT:
-            logging.info(
-                f"Issue EVENT ({current_event}) to EXECUTOR ({executor_id})")
 
         return response
 
-    def CLIENT_EXECUTE_COMPLETION(self, request, context):
-        """FL clients complete the execution task.
+    def UPLOAD_WEIGHTS(self, request, context):
+        """Handle incoming model weights from neighbors.
 
         Args:
-            request (CompleteRequest): Complete request info from executor.
+            request (UploadWeightRequest): Upload weight request info from neighbor.
 
         Returns:
             ServerResponse: Server response to job completion request
 
         """
+        self.dispatch_receive_events(request)
 
-        executor_id, client_id, event = request.executor_id, request.client_id, request.event
-        execution_status, execution_msg = request.status, request.msg
-        meta_result, data_result = request.meta_result, request.data_result
+        event = commons.GL_ACK
+        response_data = response_msg = commons.GL_ACK_RESPONSE
+        response = job_api_pb2.ServerResponse(event=event,
+                                              meta=response_msg, data=response_data)
 
-        if event == commons.GL_SEND_WEIGHTS:
-            # TODO prob not right, need to fix by adding to a queue or something
-            self.dispatch_worker_events(request)
-        else:
-            logging.error(
-                f"Received undefined event {event} from client {client_id}")
-
-        return self.CLIENT_PING(request, context)
+        return response
 
 
 if __name__ == "__main__":

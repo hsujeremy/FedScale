@@ -15,11 +15,14 @@ DUMMY_EVENT = 'dummy_event'
 UPLOAD_MODEL = 'upload_model'
 
 # Define Basic GL Events
+GL_ACK = 'ack'
+
+# Client A sends GL_REQUEST_WEIGHTS to client B to get weights back
 GL_REQUEST_WEIGHTS = "request_weights"
-GL_SEND_WEIGHTS = "send_weights"
 
 # PLACEHOLD
 DUMMY_RESPONSE = 'N'
+GL_ACK_RESPONSE = 'ACK'
 
 
 TENSORFLOW = 'tensorflow'
