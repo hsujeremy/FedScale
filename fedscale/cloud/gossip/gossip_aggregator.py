@@ -1,21 +1,32 @@
-import torch
-import grpc
-from concurrent import futures
-import logging
-import random
 import collections
-import numpy as np
+import logging
+import os
+import pickle
+import random
+import time
+from concurrent import futures
 
+import grpc
+import numpy as np
+import torch
+import wandb
+
+import fedscale.cloud.gossip.job_api_pb2 as job_api_pb2
+import fedscale.cloud.gossip.job_api_pb2_grpc as job_api_pb2_grpc
 import fedscale.cloud.logger.aggregator_logging as logger
-import fedscale.cloud.channels.job_api_pb2_grpc as job_api_pb2_grpc
-from fedscale.cloud.resource_manager import ResourceManager
-from fedscale.cloud.client_manager import ClientManager
 from fedscale.cloud import commons
+from fedscale.cloud.client_manager import ClientManager
+from fedscale.cloud.resource_manager import ResourceManager
 
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
 
+
 class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
     def __init__(self, args):
+        # init aggregator loger
+        logger.initiate_aggregator_setting()
+
+        logging.info(f"Job args {args}")
         self.args = args
         self.device = args.cuda_device if args.use_cuda else torch.device(
             'cpu'
@@ -25,22 +36,47 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
         self.resource_manager = ResourceManager(commons.SIMULATION_MODE)
         self.client_manager = self.init_client_manager(args=args)
 
-        # ======== channels ========
+        # ======== Channels ========
         self.connection_timeout = self.args.connection_timeout
         self.executors = None
         self.grpc_server = None
 
-        # ======== Event Queue =======
+        # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
         self.server_events_queue = collections.deque()
+        self.broadcast_events_queue = collections.deque()  # Broadcast
 
-        self.client_training_results = {}
-        
-        pass 
+        # TODO determine if its useful for aggregating training/testing results
+        # self.client_training_results = {}
+
+        # ======== Runtime Information ========
+        self.registered_executor_info = set()
+
+        # ======== Wandb ========
+        if args.wandb_token != "":
+            os.environ['WANDB_API_KEY'] = args.wandb_token
+            self.wandb = wandb
+            if self.wandb.run is None:
+                self.wandb.init(project=f'fedscale-{args.job_name}',
+                                name=f'aggregator{args.this_rank}-{args.time_stamp}',
+                                group=f'{args.time_stamp}')
+                self.wandb.config.update({
+                    "num_participants": args.num_participants,
+                    "data_set": args.data_set,
+                    "model": args.model,
+                    "gradient_policy": args.gradient_policy,
+                    "eval_interval": args.eval_interval,
+                    "rounds": args.rounds,
+                    "batch_size": args.batch_size,
+                    "use_cuda": args.use_cuda
+                })
+            else:
+                logging.error("Warning: wandb has already been initialized")
+            # self.wandb.run.name = f'{args.job_name}-{args.time_stamp}'
+        else:
+            self.wandb = None
 
     def run(self):
-        self.setup_env()
-
         self.init_control_communication()
         self.event_monitor()
         self.stop()
@@ -56,30 +92,22 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
 
         """
         self.server_events_queue.append((client_id, event, meta, data))
-    
 
-    def setup_env(self):
-        """Set up experiments environment and server optimizer
-        """
-        self.setup_seed(seed=1)
-
-    def setup_seed(self, seed=1):
-        """Set global random seed for better reproducibility
+    def broadcast_aggregator_events(self, event):
+        """Issue tasks (events) to aggregator worker processes by adding grpc request event
+        (e.g. MODEL_TEST, MODEL_TRAIN) to event_queue.
 
         Args:
-            seed (int): random seed
+            event (string): grpc event (e.g. MODEL_TEST, MODEL_TRAIN) to event_queue.
 
         """
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-        torch.backends.cudnn.deterministic = True
+        self.broadcast_events_queue.append(event)
 
     def init_control_communication(self):
         """Create communication channel between coordinator and executor.
         This channel serves control messages.
         """
+        logging.info(f"Initiating control plane communication ...")
 
         # simulation mode
         num_of_executors = 0
@@ -90,6 +118,7 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
                     num_of_executors += 1
         self.executors = list(range(num_of_executors))
 
+        # initiate a server process
         self.grpc_server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=20),
             options=[
@@ -100,25 +129,245 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
 
         job_api_pb2_grpc.add_JobServiceServicer_to_server(
             self, self.grpc_server)
-        
         port = '[::]:{}'.format(self.args.ps_port)
-        logging.info(f'%%%%%%%%%% Opening aggregator server using port {port} %%%%%%%%%%')
+
+        logging.info(
+            f'%%%%%%%%%% Opening aggregator server using port {port} %%%%%%%%%%')
 
         self.grpc_server.add_insecure_port(port)
         self.grpc_server.start()
-    
+
+    def client_register_handler(self, executor_id, info):
+        """Triggered once receive new executor registration.
+
+        Args:
+            executor_id (int): Executor Id
+            info (dictionary): Executor information
+
+        """
+        # TODO Figure out registering info with executors since now client = executor
+        logging.info(f"Loading {len(info['size'])} client traces ...")
+        for _size in info['size']:
+            # since the worker rankId starts from 1, we also configure the initial dataId as 1
+            mapped_id = (self.num_of_clients + 1) % len(
+                self.client_profiles) if len(self.client_profiles) > 0 else 1
+            systemProfile = self.client_profiles.get(
+                mapped_id, {'computation': 1.0, 'communication': 1.0})
+
+            client_id = (
+                self.num_of_clients + 1) if self.experiment_mode == commons.SIMULATION_MODE else executor_id
+            self.client_manager.register_client(
+                executor_id, client_id, size=_size, speed=systemProfile)
+            self.client_manager.registerDuration(
+                client_id,
+                batch_size=self.args.batch_size,
+                local_steps=self.args.local_steps,
+                upload_size=self.model_update_size,
+                download_size=self.model_update_size
+            )
+            self.num_of_clients += 1
+
+        logging.info("Info of all feasible clients {}".format(
+            self.client_manager.getDataInfo()))
+
+    def executor_info_handler(self, executor_id, info):
+        """Handler for register executor info and it will start the round after number of
+        executor reaches requirement.
+
+        Args:
+            executor_id (int): Executor Id
+            info (dictionary): Executor information
+
+        """
+        self.registered_executor_info.add(executor_id)
+        logging.info(
+            f"Received executor {executor_id} information, {len(self.registered_executor_info)}/{len(self.executors)}")
+
+        self.client_register_handler(executor_id, info)
+        if len(self.registered_executor_info) == len(self.executors):
+            self.broadcast_aggregator_events(commons.START_ROUND)
+
     def event_monitor(self):
         """Activate event handler according to the received new message
         """
         logging.info("Start monitoring events ...")
 
         # TODO: figure out what events to monitor - we don't send, so only sever events
-        # TODO: wandb logging
-        while True: 
-            pass
+        while True:
+            # Broadcast events to clients
+            if len(self.broadcast_events_queue) > 0:
+                current_event = self.broadcast_events_queue.popleft()
+                self.dispatch_client_events(current_event)
+            else:
+                # execute every 100 ms
+                time.sleep(0.1)
+
+    def dispatch_client_events(self, event, clients=None):
+        """Issue tasks (events) to clients
+
+        Args:
+            event (string): grpc event (e.g. MODEL_TEST, MODEL_TRAIN) to event_queue.
+            clients (list of int): target client ids for event.
+
+        """
+        if clients is None:
+            clients = self.sampled_executors
+
+        for client_id in clients:
+            self.individual_client_events[client_id].append(event)
+
+    def deserialize_response(self, responses):
+        """Deserialize the response from executor
+
+        Args:
+            responses (byte stream): Serialized response from executor.
+
+        Returns:
+            string, bool, or bytes: The deserialized response object from executor.
+        """
+        return pickle.loads(responses)
+
+    def serialize_response(self, responses):
+        """ Serialize the response to send to server upon assigned job completion
+
+        Args:
+            responses (ServerResponse): Serialized response from server.
+
+        Returns:
+            bytes: The serialized response object to server.
+
+        """
+        return pickle.dumps(responses)
+
+    def get_client_conf(self, client_id):
+        """Training configurations that will be applied on clients,
+        developers can further define personalized client config here.
+
+        Args:
+            client_id (int): The client id.
+
+        Returns:
+            dictionary: TorchClient training config.
+
+        """
+        conf = {
+            'learning_rate': self.args.learning_rate,
+        }
+        return conf
+
+    def create_client_task(self, executor_id):
+        """Issue a new client training task to specific executor
+
+        Args:
+            executorId (int): Executor Id.
+
+        Returns:
+            tuple: Training config for new task. (dictionary, PyTorch or TensorFlow module)
+
+        """
+        # TODO FIgure out if executor/client distinction is still necessary
+        train_config = None
+        config = self.get_client_conf(executor_id)
+        train_config = {'client_id': executor_id, 'task_config': config}
+        return train_config, self.model_wrapper.get_weights()
+
+    def get_test_config(self, client_id):
+        """FL model testing on clients, developers can further define personalized client config here.
+
+        Args:
+            client_id (int): The client id.
+
+        Returns:
+            dictionary: The testing config for new task.
+
+        """
+        return {'client_id': client_id}
+
+    def get_shutdown_config(self, client_id):
+        """Shutdown config for client, developers can further define personalized client config here.
+
+        Args:
+            client_id (int): TorchClient id.
+
+        Returns:
+            dictionary: Shutdown config for new task.
+
+        """
+        return {'client_id': client_id}
+
+    def CLIENT_REGISTER(self, request, context):
+        """FL TorchClient register to the aggregator
+
+        Args:
+            request (RegisterRequest): Registeration request info from executor.
+
+        Returns:
+            ServerResponse: Server response to registeration request
+
+        """
+
+        # NOTE: client_id = executor_id in deployment,
+        # while multiple client_id uses the same executor_id (VMs) in simulations
+        executor_id = request.executor_id
+        executor_info = self.deserialize_response(request.executor_info)
+        if executor_id not in self.individual_client_events:
+            logging.info(
+                f"Detect new client: {executor_id}, executor info: {executor_info}")
+            self.individual_client_events[executor_id] = collections.deque()
+        else:
+            logging.info(f"Previous client: {executor_id} resumes connecting")
+
+        # We can customize whether to admit the clients here
+        self.executor_info_handler(executor_id, executor_info)
+        dummy_data = self.serialize_response(commons.DUMMY_RESPONSE)
+
+        return job_api_pb2.ServerResponse(event=commons.DUMMY_EVENT,
+                                          meta=dummy_data, data=dummy_data)
+
+    def CLIENT_PING(self, request, context):
+        """Handle client ping requests
+
+        Args:
+            request (PingRequest): Ping request info from executor.
+
+        Returns:
+            ServerResponse: Server response to ping request
+
+        """
+        # NOTE: client_id = executor_id in deployment,
+        # while multiple client_id may use the same executor_id (VMs) in simulations
+        executor_id, client_id = request.executor_id, request.client_id
+        response_data = response_msg = commons.DUMMY_RESPONSE
+        current_event = commons.DUMMY_EVENT
+
+        if self.individual_client_events[executor_id]:
+            current_event = self.individual_client_events[executor_id].popleft(
+            )
+            if current_event == commons.START_ROUND:
+                # TODO This should function as a start training event
+                response_msg, response_data = self.create_client_task(
+                    executor_id)
+            elif current_event == commons.MODEL_TEST:
+                response_msg = self.get_test_config(client_id)
+            elif current_event == commons.SHUT_DOWN:
+                response_msg = self.get_shutdown_config(executor_id)
+
+        response_msg, response_data = self.serialize_response(
+            response_msg), self.serialize_response(response_data)
+        # NOTE: in simulation mode, response data is pickle for faster (de)serialization
+        response = job_api_pb2.ServerResponse(event=current_event,
+                                              meta=response_msg, data=response_data)
+        if current_event != commons.DUMMY_EVENT:
+            logging.info(
+                f"Issue EVENT ({current_event}) to EXECUTOR ({executor_id})")
+
+        return response
 
     def stop(self):
         """
             TODO: wandb logging
         """
-
+        logging.info(f"Terminating the aggregator ...")
+        if self.wandb != None:
+            self.wandb.finish()
+        time.sleep(5)

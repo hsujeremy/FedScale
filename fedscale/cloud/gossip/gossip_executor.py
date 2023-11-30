@@ -14,8 +14,8 @@ import torch
 import wandb
 import pickle
 
-import fedscale.cloud.channels.job_api_pb2 as job_api_pb2
-import fedscale.cloud.channels.job_api_pb2_grpc as job_api_pb2_grpc
+import fedscale.cloud.gossip.job_api_pb2 as job_api_pb2
+import fedscale.cloud.gossip.job_api_pb2_grpc as job_api_pb2_grpc
 import fedscale.cloud.logger.executor_logging as logger
 from fedscale.cloud.aggregation.optimizers import TorchServerOptimizer
 from fedscale.cloud.client_manager import ClientManager
@@ -95,6 +95,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.start_run_time = time.time()
         self.received_stop_request = False
 
+        # ======== Wandb ========
         if args.wandb_token != "":
             os.environ['WANDB_API_KEY'] = args.wandb_token
             self.wandb = wandb
