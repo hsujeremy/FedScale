@@ -1,18 +1,15 @@
 import grpc
 import concurrent.futures as futures
 import logging
+import fedscale.cloud.config_parser as parser
+
+from fedscale.cloud.gossip.gossip_executor import Executor
 
 def create_server(port: int):
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    port = '[::]:{}'.format(port)
-
-    print(f'%%%%%%%%%% Opening aggregator server using port {port} %%%%%%%%%%')
-
-    server.add_insecure_port(port)
-    server.start()
-    server.wait_for_termination()
+    e = Executor(args=parser.args, client_id=port)
+    e.run()
 
 if __name__ == "__main__": 
-    create_server(2)
+    create_server(1)
 
 

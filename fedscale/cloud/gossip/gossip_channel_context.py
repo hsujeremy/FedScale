@@ -24,10 +24,13 @@ class ClientConnections(object):
         the duration of training.
         """
         for port in range(self.ports):
-            logging.info('%%%%%%%%%% Opening grpc connection to ' +
-                        self.aggregator_address + 'at port ' +  port + ' %%%%%%%%%%')
+            if port == self.client_id: 
+                continue
+            logging.info(
+                f'%%%%%%%%%% Opening grpc connection to {self.aggregator_address} at port {port + 1} %%%%%%%%%%'
+            )
             channel = grpc.insecure_channel(
-                '{}:{}'.format(self.aggregator_address, port),
+                '{}:{}'.format(self.aggregator_address, port + 1),
                 options=[
                     ('grpc.max_send_message_length', MAX_MESSAGE_LENGTH),
                     ('grpc.max_receive_message_length', MAX_MESSAGE_LENGTH),
@@ -35,7 +38,7 @@ class ClientConnections(object):
             )
 
             self.channels.append(channel)
-            self.stubs.append(job_api_pb2_grpc.JobServiceStub(self.channel))
+            self.stubs.append(job_api_pb2_grpc.JobServiceStub(channel))
 
     def close_sever_connection(self):
         logging.info(
