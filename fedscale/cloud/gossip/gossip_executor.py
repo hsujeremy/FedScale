@@ -133,7 +133,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         job_api_pb2_grpc.add_JobServiceServicer_to_server(
             self, self.grpc_server)
 
-        port = '[::]:{}'.format(self.client_id + 1)
+        port = '[::]:{}'.format(self.client_id + 4001)
         logging.info(
             f'%%%%%%%%%% Opening client server using port {port} %%%%%%%%%%')
 
@@ -657,12 +657,17 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
     def client_ping(self, stub):
         """Ping the aggregator for new task
         """
-        response = stub.CLIENT_PING(job_api_pb2.PingRequest(
-            client_id=str(self.client_id),
-            executor_id=str(self.executor_id)
-        ))
+        try:
+            response = stub.CLIENT_PING(job_api_pb2.PingRequest(
+                client_id=str(self.client_id),
+                executor_id=str(self.executor_id)
+            ))
 
-        return response
+            return response
+        except:
+            response = job_api_pb2.ServerResponse(event="Failed to connect to aggregator.",
+                                              meta=self.serialize_response("test"), data=self.serialize_response("test"))
+            return response
         # self.dispatch_worker_events(response)
 
     def stop(self):

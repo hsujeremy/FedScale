@@ -30,7 +30,7 @@ class ClientConnections(object):
                 f'%%%%%%%%%% Opening grpc connection to {self.aggregator_address} at port {port + 1} %%%%%%%%%%'
             )
             channel = grpc.insecure_channel(
-                '{}:{}'.format(self.aggregator_address, port + 1),
+                '{}:{}'.format(self.aggregator_address, port + 4001),
                 options=[
                     ('grpc.max_send_message_length', MAX_MESSAGE_LENGTH),
                     ('grpc.max_receive_message_length', MAX_MESSAGE_LENGTH),
