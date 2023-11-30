@@ -64,7 +64,7 @@ class Executor(object):
                                 group=f'{args.time_stamp}')
             else:
                 logging.error("Warning: wandb has already been initialized")
-            
+
         else:
             self.wandb = None
         super(Executor, self).__init__()
@@ -412,7 +412,7 @@ class Executor(object):
                     logging.info(f"Caught exception {e} from aggregator, terminating executor {self.this_rank} ...")
                     self.Stop()
 
-    
+
     def log_test_result(self, test_res):
         """Log test results to wandb server if enabled
         """

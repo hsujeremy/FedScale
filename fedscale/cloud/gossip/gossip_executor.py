@@ -24,14 +24,14 @@ from fedscale.cloud.execution.rl_client import RLClient
 from fedscale.cloud.execution.tensorflow_client import TensorflowClient
 from fedscale.cloud.execution.torch_client import TorchClient
 from fedscale.cloud.fllibs import *
-from fedscale.cloud.gossip.gossip_channel_context import ClientConnections
+from fedscale.cloud.gossip.gossip_channel_context import GossipClientConnections
 from fedscale.cloud.internal.tensorflow_model_adapter import \
     TensorflowModelAdapter
 from fedscale.cloud.internal.torch_model_adapter import TorchModelAdapter
 from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
 
 """
-Make a server for each client 
+Make a server for each client
 """
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
 
@@ -54,7 +54,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.args = args
         self.num_executors = args.num_executors
-        
+
         self.num_neighbors = 0
         self.neighbor_threshold = 0.7
         self.model_updates_threshold = 0.7
@@ -83,8 +83,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.client_manager = self.init_client_manager(args=args)
 
         # ======== channels ========
-        # TODO Make connections to other executors
-        self.client_communicator = ClientConnections(
+        # TODO: This function currently just sets up the gRPC server for the
+        # current client/executor. Maybe it could also try to make connections
+        # to other executors.
+        self.client_communicator = GossipClientConnections(
             args.ps_ip, client_id, ports)
 
         # ======== runtime information ========
@@ -106,7 +108,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         else:
             self.wandb = None
 
-        # TODO: register neighbors 
+        # TODO: register neighbors
         super(Executor, self).__init__()
 
     def init_control_communication(self):
@@ -228,8 +230,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
     def train(self):
 
         # TODO should deal with a set number of iterations at a time
-        # config is usually passed as a message, but config can be a set 
-        # dict each time 
+        # config is usually passed as a message, but config can be a set
+        # dict each time
 
         train_config = {
             'learning_rate': self.args.learning_rate,
@@ -259,7 +261,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                            batch_size=conf.batch_size, args=self.args,
                            collate_fn=self.collate_fn
                            )
-        
+
         # TODO figure out if current trainer handles set number of iterations at a time
         train_res = self.get_client_trainer(self.args).train(
             client_data=client_data, model=self.model_adapter.get_model(), conf=conf)
@@ -269,21 +271,21 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
     def run(self):
         """
             after each training loop,
-                check # of incoming requests: 
+                check # of incoming requests:
                     clients to send weights
         """
         self.setup_env()
         self.init_control_communication()
         self.init_model()
         time.sleep(10)
-        
+
         logging.info("Starting loop...")
         while True:
             neighbor = 0 if self.client_id == 1 else 1
             logging.info(f"Pinging client {neighbor}...")
             stub = self.client_communicator.stubs[0]
-            response = self.client_ping(stub)            
-            
+            response = self.client_ping(stub)
+
             event = response.event
             logging.info(event)
             time.sleep(5)
@@ -293,17 +295,17 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         # # TODO fix how training works
         # # Should train a few batches at a time and check for intermitent events between
-        
+
         # # TODO (jeremy): implement retries
         # for i in range(self.num_iterations):
-        #     if i > 0 and i % 10 == 0: 
+        #     if i > 0 and i % 10 == 0:
         #         # TODO after a set number of iterations (e.g. 10), request weights from clients
-        #         # TODO: in the case of error 
+        #         # TODO: in the case of error
         #         neighbors = self.select_neighbors(min_replies=self.neighbor_threshold)
         #         self.num_neighbors = len(neighbors)
-        #         counter = 0 
+        #         counter = 0
         #         while True:
-        #             # get stubs from client communicator 
+        #             # get stubs from client communicator
         #             for neighbor in neighbors:
         #                 stub = self.client_communicator.stubs[neighbor]
         #                 res = stub.REQUEST_WEIGHTS(
@@ -316,7 +318,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         #                 res_client_id = res.client_id
         #                 res_exeuctor_id = res.executor_id
         #                 # TODO: check for error
-        #                 counter += 1                        
+        #                 counter += 1
         #             if counter >= len(neighbors):
         #                 break
 
@@ -324,7 +326,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         #         logging.info(f"Client {self.client_id} waiting to receive weights...")
         #         while len(self.receive_events_queue) < int(self.model_updates_threshold * self.num_neighbors):
         #             time.sleep(0.1)
-    
+
         #         logging.info(f"Client {self.client_id} aggregating weights...")
         #         self.model_weights = self.model_wrapper.get_weights()
         #         # check queue
@@ -336,7 +338,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
 
         #     # check queue
-        #     # if we have any requests to send out weights 
+        #     # if we have any requests to send out weights
         #     while self.send_events_queue:
         #         client_id, meta, data = self.send_events_queue.popleft()
         #         # process event
@@ -390,7 +392,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     def dispatch_receive_events(self, request):
         """Add new events to worker queue for sending out weights.
-        
+
         Args:
             request (string): Add grpc request from server (e.g. MODEL_TEST, MODEL_TRAIN) to events_queue.
 
@@ -472,7 +474,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         """Updates the aggregation with weights received from neighbor.
 
         Args:
-            weights (list): The weights received from neighbor.      
+            weights (list): The weights received from neighbor.
         """
         if type(weights) is dict:
             weights = [x for x in weights.values()]
@@ -609,7 +611,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         Should send back a response to the sender immediately, but then submit
         an internal queue "request" to send the weights to the sender via the
-        UploadWeights RPC. 
+        UploadWeights RPC.
 
         Args:
             request (WeightRequest): Ping request info from neighbor.
@@ -619,7 +621,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         """
         self.dispatch_send_events(request)
-        
+
         event = commons.GL_ACK
         response_data = response_msg = commons.GL_ACK_RESPONSE
         response = job_api_pb2.ServerResponse(event=event,
@@ -645,15 +647,15 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                               meta=response_msg, data=response_data)
 
         return response
-    
+
     def CLIENT_PING(self, request, context):
         executor_id, client_id = request.executor_id, request.client_id
         logging.info(f"Received ping request from client {client_id}, executor {executor_id}")
         response = job_api_pb2.ServerResponse(event=commons.GL_ACK,
                                               meta=self.serialize_response("test"), data=self.serialize_response("test"))
 
-        return response 
-    
+        return response
+
     def client_ping(self, stub):
         """Ping the aggregator for new task
         """

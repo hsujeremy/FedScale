@@ -7,7 +7,7 @@ import fedscale.cloud.channels.job_api_pb2_grpc as job_api_pb2_grpc
 MAX_MESSAGE_LENGTH = 1*1024*1024*1024  # 1GB
 
 
-class ClientConnections(object):
+class GossipClientConnections(object):
     """"Clients build connections to the cloud aggregator."""
 
     def __init__(self, aggregator_address, client_id, ports, base_port=18888):
@@ -23,8 +23,9 @@ class ClientConnections(object):
         Initialize all server connections. Assume that this list is static for
         the duration of training.
         """
+        # TODO: what if one of the ports isn't open yet?
         for port in range(self.ports):
-            if port == self.client_id: 
+            if port == self.client_id:
                 continue
             logging.info(
                 f'%%%%%%%%%% Opening grpc connection to {self.aggregator_address} at port {port + 1} %%%%%%%%%%'
@@ -40,7 +41,7 @@ class ClientConnections(object):
             self.channels.append(channel)
             self.stubs.append(job_api_pb2_grpc.JobServiceStub(channel))
 
-    def close_sever_connection(self):
+    def close_server_connection(self):
         logging.info(
             '%%%%%%%%%% Closing grpc connection to the aggregator %%%%%%%%%%')
         for channel in self.channels:
