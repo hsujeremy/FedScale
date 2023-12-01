@@ -278,7 +278,11 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.setup_env()
         self.init_control_communication()
         self.init_model()
+        self.training_sets, self.testing_sets = self.init_data()
         time.sleep(10)
+
+        logging.info('Registering client with coordinator')
+        self.client_register()
 
         logging.info("Starting loop...")
         while True:
@@ -561,23 +565,42 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         """Register the client information to neighbors
         """
         start_time = time.time()
-        for stub in self.client_communicator.stubs:
-            while time.time() - start_time < 180:
-                try:
-                    response = stub.CLIENT_REGISTER(
-                        job_api_pb2.RegisterRequest(
-                            client_id=self.executor_id,
-                            executor_id=self.executor_id,
-                            executor_info=self.serialize_response(
-                                self.report_executor_info_handler())
-                        )
+
+        # for stub in self.client_communicator.stubs:
+        #     while time.time() - start_time < 180:
+        #         try:
+        #             # TODO: I think this is finding the wrong port
+        #             response = stub.CLIENT_REGISTER(
+        #                 job_api_pb2.RegisterRequest(
+        #                     client_id=self.executor_id,
+        #                     executor_id=self.executor_id,
+        #                     executor_info=self.serialize_response(
+        #                         self.report_executor_info_handler())
+        #                 )
+        #             )
+        #             self.dispatch_worker_events(response)
+        #             break
+        #         except Exception as e:
+        #             logging.warning(
+        #                 f"Failed to connect to aggregator {e}. Will retry in 5 sec.")
+        #             time.sleep(5)
+
+        while time.time() - start_time < 180:
+            try:
+                response = self.client_communicator.aggregator_stub.CLIENT_REGISTER(
+                    job_api_pb2.RegisterRequest(
+                        client_id=self.executor_id,
+                        executor_id=self.executor_id,
+                        executor_info=self.serialize_response(
+                            self.report_executor_info_handler())
                     )
-                    self.dispatch_worker_events(response)
-                    break
-                except Exception as e:
-                    logging.warning(
-                        f"Failed to connect to aggregator {e}. Will retry in 5 sec.")
-                    time.sleep(5)
+                )
+                # self.dispatch_worker_events(response)
+                break
+            except Exception as e:
+                logging.warning(
+                    f"Failed to connect to aggregator {e}. Will retry in 5 sec.")
+                time.sleep(5)
 
     def CLIENT_REGISTER(self, request, context):
         """FL TorchClient register to the aggregator
