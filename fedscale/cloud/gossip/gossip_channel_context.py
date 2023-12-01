@@ -23,7 +23,9 @@ class GossipClientConnections(object):
         Initialize all server connections. Assume that this list is static for
         the duration of training.
         """
-        # TODO: what if one of the ports isn't open yet?
+        # TODO: what if one of the ports isn't open/used by an active client yet?
+        # - Seems like the channel is created regardless, without throwing an error.
+        # TODO: what if the clients have different host names? Need to store those too
         for port in range(self.ports):
             if port == self.client_id:
                 continue
