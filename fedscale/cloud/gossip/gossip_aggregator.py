@@ -32,6 +32,8 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
             'cpu'
         )
 
+        self.experiment_mode = args.experiment_mode
+
         self.round_duration = 0.
         self.resource_manager = ResourceManager(commons.SIMULATION_MODE)
         self.client_manager = ClientManager(args.sample_mode, args=args)
@@ -51,6 +53,8 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
 
         # ======== Runtime Information ========
         self.registered_executor_info = set()
+        self.num_of_clients = 0
+        self.model_update_size = 0
 
         # ======== Wandb ========
         if args.wandb_token != "":
@@ -77,9 +81,29 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
             self.wandb = None
 
     def run(self):
+        self.client_profiles = self.load_client_profile(
+            file_path=self.args.device_conf_file)
         self.init_control_communication()
         self.event_monitor()
         self.stop()
+
+    def load_client_profile(self, file_path):
+        """For Simulation Mode: load client profiles/traces
+
+        Args:
+            file_path (string): File path for the client profiles/traces
+
+        Returns:
+            dictionary: Return the client profiles/traces
+
+        """
+        global_client_profile = {}
+        if os.path.exists(file_path):
+            with open(file_path, 'rb') as fin:
+                # {client_id: [computer, bandwidth]}
+                global_client_profile = pickle.load(fin)
+
+        return global_client_profile
 
     def add_event_handler(self, client_id, event, meta, data):
         """ Due to the large volume of requests, we will put all events into a queue first.
@@ -158,13 +182,13 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
                 self.num_of_clients + 1) if self.experiment_mode == commons.SIMULATION_MODE else executor_id
             self.client_manager.register_client(
                 executor_id, client_id, size=_size, speed=systemProfile)
-            self.client_manager.registerDuration(
-                client_id,
-                batch_size=self.args.batch_size,
-                local_steps=self.args.local_steps,
-                upload_size=self.model_update_size,
-                download_size=self.model_update_size
-            )
+            # self.client_manager.registerDuration(
+            #     client_id,
+            #     batch_size=self.args.batch_size,
+            #     local_steps=self.args.local_steps,
+            #     # upload_size=self.model_update_size,
+            #     # download_size=self.model_update_size
+            # )
             self.num_of_clients += 1
 
         logging.info("Info of all feasible clients {}".format(
