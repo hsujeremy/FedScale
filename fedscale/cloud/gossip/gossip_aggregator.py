@@ -34,7 +34,7 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
 
         self.round_duration = 0.
         self.resource_manager = ResourceManager(commons.SIMULATION_MODE)
-        self.client_manager = self.init_client_manager(args=args)
+        self.client_manager = ClientManager(args.sample_mode, args=args)
 
         # ======== Channels ========
         self.connection_timeout = self.args.connection_timeout
