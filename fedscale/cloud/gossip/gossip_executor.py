@@ -310,8 +310,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                         break
 
                 # Wait for neighbors to send back weights
-                logging.info(f"Client {self.client_id} waiting to receive weights...")
-                while len(self.receive_events_queue) < int(self.model_updates_threshold * self.num_neighbors):
+                min_num_neighbors = int(self.model_updates_threshold * self.num_neighbors)
+                logging.info(f"Client {self.client_id} waiting to receive weights from {min_num_neighbors} neighbors")
+                while len(self.receive_events_queue) < min_num_neighbors:
                     time.sleep(0.1)
 
                 logging.info(f"Client {self.client_id} aggregating weights...")
@@ -332,7 +333,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                     self.client_send_weights_handler(
                         client_id, weights)
             
-            logging.info(f"Training iteration {i} of {self.num_iterations}")
+            logging.info(f"Training iteration {i + 1} of {self.num_iterations}")
             weights = self.train()["update_weight"]
 
     def run(self):
@@ -402,6 +403,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             train_res (dictionary): The results from training.
 
         """
+        logging.info(f"Sending weights to client {client_id}")
+
         # Send model to client
         future_call = self.client_communicator.stubs[client_id].UPLOAD_WEIGHTS.future(
             job_api_pb2.UploadWeightRequest(client_id=str(self.client_id),
