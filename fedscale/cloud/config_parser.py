@@ -214,6 +214,7 @@ parser.add_argument('--noise-max', default=0.5,
                     help='Maximum noise levels to sample from. Maximum 1.0', type=float)
 parser.add_argument('--no-bidirectional', dest='bidirectional', action='store_false', default=True,
                     help='Turn off bi-directional RNNs, introduces lookahead convolution')
+parser.add_argument('--port', type=int, help='The port of the server.', default=0)
 
 args, unknown = parser.parse_known_args()
 args.use_cuda = eval(args.use_cuda)

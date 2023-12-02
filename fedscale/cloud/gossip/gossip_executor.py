@@ -37,7 +37,7 @@ MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
 
 
 class Executor(job_api_pb2_grpc.JobServiceServicer):
-    def __init__(self, args, num_iterations=100, client_id=0, ports=2):
+    def __init__(self, args, num_iterations=100, client_id=0):
         logger.initiate_client_setting()
 
         self.num_iterations = num_iterations
@@ -63,12 +63,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             'cpu')
         # ======== Env Information ========
         self.this_rank = args.this_rank
-        self.executor_id = str(self.this_rank)
 
         # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
         self.receive_events_queue = collections.deque()
         self.send_events_queue = collections.deque()
+        self.coordinator_events_queue = collections.deque()
+        self.waiting_for_start = False 
         # ======== Model and Data ========
         self.training_sets = self.test_dataset = None
         self.model_wrapper = None
@@ -87,7 +88,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         # current client/executor. Maybe it could also try to make connections
         # to other executors.
         self.client_communicator = GossipClientConnections(
-            args.ps_ip, client_id, ports)
+            args.ps_ip, client_id, ports=args.num_executors)
 
         # ======== runtime information ========
         self.collate_fn = None
@@ -138,7 +139,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         port = '[::]:{}'.format(self.client_id + 4001)
         logging.info(
-            f'%%%%%%%%%% Opening client server using port {port} %%%%%%%%%%')
+            f'%%%%%%%%%% Opening client for client {self.client_id} server using port {port} %%%%%%%%%%')
 
         self.grpc_server.add_insecure_port(port)
         self.grpc_server.start()
@@ -284,6 +285,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         logging.info('Registering client with coordinator')
         self.client_register()
 
+        while self.waiting_for_start:
+            logging.info(f"Executor {self.client_id} waiting to start...")
+            time.sleep(2)
+                
         logging.info("Starting loop...")
         while True:
             neighbor = 0 if self.client_id == 1 else 1
@@ -412,6 +417,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         """
         self.send_events_queue.append(request)
+    
+    def dispatch_coordinator_events(self, event):
+        self.coordinator_events_queue.append(event)
 
     def init_client_manager(self, args):
         """ Initialize client sampler
@@ -528,7 +536,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             self.client_register_handler(executor_id, info)
             if len(self.registered_executor_info) == len(self.executors):
                 self.round_completion_handler()
-
+    
     def client_register_handler(self, executor_id, info):
         """Triggered once receive new executor registration.
 
@@ -587,10 +595,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         while time.time() - start_time < 180:
             try:
+                # is there a race condition where True is set after the response but 
+                # the aggregator has already broadcasted? 
+                self.waiting_for_start = True
                 response = self.client_communicator.aggregator_stub.CLIENT_REGISTER(
                     job_api_pb2.RegisterRequest(
-                        client_id=self.executor_id,
-                        executor_id=self.executor_id,
+                        client_id=str(self.executor_id),
+                        executor_id=str(self.executor_id),
                         executor_info=self.serialize_response(
                             self.report_executor_info_handler())
                     )
@@ -598,6 +609,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 # self.dispatch_worker_events(response)
                 break
             except Exception as e:
+                self.waiting_for_start = False
+
                 logging.warning(
                     f"Failed to connect to aggregator {e}. Will retry in 5 sec.")
                 time.sleep(5)
@@ -673,8 +686,12 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         return response
 
     def CLIENT_PING(self, request, context):
+        if self.waiting_for_start:
+            self.waiting_for_start = False
+        
         executor_id, client_id = request.executor_id, request.client_id
         logging.info(f"Received ping request from client {client_id}, executor {executor_id}")
+
         response = job_api_pb2.ServerResponse(event=commons.GL_ACK,
                                               meta=self.serialize_response("test"), data=self.serialize_response("test"))
 

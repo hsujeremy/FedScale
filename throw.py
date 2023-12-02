@@ -13,9 +13,7 @@ def create_server(port: int):
 
 
 if __name__ == "__main__":
-    aparser = argparse.ArgumentParser(description="Run the server.")
-    aparser.add_argument('port', type=int, help='The port of the server.')
-    args = aparser.parse_args()
-    create_server(args.port)
+
+    create_server(parser.args.port)
 
 

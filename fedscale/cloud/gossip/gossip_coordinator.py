@@ -17,16 +17,15 @@ import fedscale.cloud.logger.aggregator_logging as logger
 from fedscale.cloud import commons
 from fedscale.cloud.client_manager import ClientManager
 from fedscale.cloud.resource_manager import ResourceManager
+from fedscale.cloud.gossip.gossip_channel_context import GossipClientConnections
 
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
 
 
-class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
+class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
     def __init__(self, args):
         # init aggregator loger
         logger.initiate_aggregator_setting()
-
-        logging.info(f"Job args {args}")
         self.args = args
         self.device = args.cuda_device if args.use_cuda else torch.device(
             'cpu'
@@ -42,6 +41,9 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
         self.connection_timeout = self.args.connection_timeout
         self.executors = None
         self.grpc_server = None
+        print(args.num_executors)
+        self.client_communicator = GossipClientConnections(
+            args.ps_ip, -1, args.num_executors, is_coordinator=True)
 
         # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
@@ -134,13 +136,13 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
         logging.info(f"Initiating control plane communication ...")
 
         # simulation mode
-        num_of_executors = 0
-        for ip_numgpu in self.args.executor_configs.split("="):
-            ip, numgpu = ip_numgpu.split(':')
-            for numexe in numgpu.strip()[1:-1].split(','):
-                for _ in range(int(numexe.strip())):
-                    num_of_executors += 1
-        self.executors = list(range(num_of_executors))
+        # num_of_executors = 0
+        # for ip_numgpu in self.args.executor_configs.split("="):
+        #     ip, numgpu = ip_numgpu.split(':')
+        #     for numexe in numgpu.strip()[1:-1].split(','):
+        #         for _ in range(int(numexe.strip())):
+        #             num_of_executors += 1
+        self.executors = list(range(self.args.num_executors))
 
         # initiate a server process
         self.grpc_server = grpc.server(
@@ -160,6 +162,7 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
 
         self.grpc_server.add_insecure_port(port)
         self.grpc_server.start()
+        self.client_communicator.connect_to_servers()
 
     def client_register_handler(self, executor_id, info):
         """Triggered once receive new executor registration.
@@ -209,6 +212,7 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
 
         self.client_register_handler(executor_id, info)
         if len(self.registered_executor_info) == len(self.executors):
+            logging.info("All clients received! Broadcasting start...")
             self.broadcast_aggregator_events(commons.START_ROUND)
 
     def event_monitor(self):
@@ -234,11 +238,18 @@ class GossipAggregator(job_api_pb2_grpc.JobServiceServicer):
             clients (list of int): target client ids for event.
 
         """
-        if clients is None:
-            clients = self.sampled_executors
+        # start training for all clients
+        if event == commons.START_ROUND:
+            self.stubs = self.client_communicator.stubs
 
-        for client_id in clients:
-            self.individual_client_events[client_id].append(event)
+            for i, stub in enumerate(self.stubs):
+                try: 
+                    response = stub.CLIENT_PING(job_api_pb2.PingRequest(
+                        client_id=str(i),
+                        executor_id=str(i)
+                    ))
+                except: 
+                    logging.info(f"Failed to start client {i}")
 
     def deserialize_response(self, responses):
         """Deserialize the response from executor
