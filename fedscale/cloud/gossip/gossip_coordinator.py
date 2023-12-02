@@ -173,26 +173,26 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
 
         """
         # TODO Figure out registering info with executors since now client = executor
-        logging.info(f"Loading client traces ...")
+        logging.info(f"Loading {len(info['size'])} client traces ...")
+        for _size in info['size']:
+            # since the worker rankId starts from 1, we also configure the initial dataId as 1
+            mapped_id = (self.num_of_clients + 1) % len(
+                self.client_profiles) if len(self.client_profiles) > 0 else 1
+            systemProfile = self.client_profiles.get(
+                mapped_id, {'computation': 1.0, 'communication': 1.0})
 
-        # since the worker rankId starts from 1, we also configure the initial dataId as 1
-        mapped_id = (self.num_of_clients + 1) % len(
-            self.client_profiles) if len(self.client_profiles) > 0 else 1
-        systemProfile = self.client_profiles.get(
-            mapped_id, {'computation': 1.0, 'communication': 1.0})
-
-        client_id = (
-            self.num_of_clients + 1) if self.experiment_mode == commons.SIMULATION_MODE else executor_id
-        self.client_manager.register_client(
-            executor_id, client_id, size=_size, speed=systemProfile)
-        # self.client_manager.registerDuration(
-        #     client_id,
-        #     batch_size=self.args.batch_size,
-        #     local_steps=self.args.local_steps,
-        #     # upload_size=self.model_update_size,
-        #     # download_size=self.model_update_size
-        # )
-        self.num_of_clients += 1
+            client_id = (
+                self.num_of_clients + 1) if self.experiment_mode == commons.SIMULATION_MODE else executor_id
+            self.client_manager.register_client(
+                executor_id, client_id, size=_size, speed=systemProfile)
+            # self.client_manager.registerDuration(
+            #     client_id,
+            #     batch_size=self.args.batch_size,
+            #     local_steps=self.args.local_steps,
+            #     # upload_size=self.model_update_size,
+            #     # download_size=self.model_update_size
+            # )
+            self.num_of_clients += 1
 
         logging.info("Info of all feasible clients {}".format(
             self.client_manager.getDataInfo()))

@@ -33,7 +33,7 @@ class GossipClientConnections(object):
         if not self.is_coordinator:
             # Connect to aggregator/coordinator
             logging.info(f'%%%%%%%%%% Opening grpc connection to coordinator ' +
-                        self.coordinator_address + ':29500 %%%%%%%%%%')
+                         self.coordinator_address + ':29500 %%%%%%%%%%')
             channel = grpc.insecure_channel(
                 '{}:{}'.format(self.coordinator_address, 29500),
                 options=[
@@ -46,7 +46,9 @@ class GossipClientConnections(object):
 
         # Connect to other clients
         for port in range(self.ports):
+            # Use placeholder for self
             if port == self.client_id:
+                self.stubs.append(None)
                 continue
             logging.info(
                 f'%%%%%%%%%% Opening grpc connection to client {port} at {self.coordinator_address} at port {port + 4001} %%%%%%%%%%'
