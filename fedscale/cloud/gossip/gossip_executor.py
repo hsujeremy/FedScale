@@ -205,7 +205,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     # TODO: maybe change variable names later since we're no including the model
     # weights in the RPC reply
-    # TODO: for testing purposes, just implement a version which selects everything
     def select_neighbors(self, min_replies, cur_time=0, buffer=0):
         """Randomly select neighbors to request weights from. This should be
         some order of magnitude higher than the minimum amount of clients we
@@ -218,12 +217,16 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         # - Enough total clients, but not any other active ones that are selected
 
         # clients_online = self.client_manager.getFeasibleClients(cur_time)
-        total_clients = self.
-        rng = Random()
-        rng.seed(233)
-        rng.shuffle(clients_online)
-        client_len = min(min_replies + buffer, len(clients_online)-1)
-        return clients_online[:client_len]
+        # rng = Random()
+        # rng.seed(233)
+        # rng.shuffle(clients_online)
+        # client_len = min(min_replies + buffer, len(clients_online)-1)
+        # return clients_online[:client_len]
+
+        # For now, just return everything
+        total_executors = list(range(self.num_executors))
+        return [i for i in total_executors if i != self.client_id]
+
 
     def override_conf(self, config):
         """ Override the variable arguments for different client
