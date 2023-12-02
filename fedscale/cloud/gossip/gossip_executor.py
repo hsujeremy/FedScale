@@ -85,9 +85,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.client_manager = self.init_client_manager(args=args)
 
         # ======== channels ========
-        # TODO: This function currently just sets up the gRPC server for the
-        # current client/executor. Maybe it could also try to make connections
-        # to other executors.
         self.client_communicator = GossipClientConnections(
             args.ps_ip, client_id, ports=args.num_executors)
 
@@ -239,11 +236,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         return Namespace(**default_conf)
 
     def train(self):
-
-        # TODO should deal with a set number of iterations at a time
-        # config is usually passed as a message, but config can be a set
-        # dict each time
-
         train_config = {
             'learning_rate': self.args.learning_rate,
         }
