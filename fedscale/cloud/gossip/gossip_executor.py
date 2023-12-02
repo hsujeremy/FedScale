@@ -4,15 +4,17 @@ import math
 import random
 import threading
 import time
-from concurrent import futures
-from random import Random
-import logging
-
 import grpc
-import numpy as np
 import torch
 import wandb
 import pickle
+import logging
+
+from concurrent import futures
+from random import Random
+from argparse import Namespace
+
+import numpy as np
 
 import fedscale.cloud.gossip.job_api_pb2 as job_api_pb2
 import fedscale.cloud.gossip.job_api_pb2_grpc as job_api_pb2_grpc
@@ -25,8 +27,7 @@ from fedscale.cloud.execution.tensorflow_client import TensorflowClient
 from fedscale.cloud.execution.torch_client import TorchClient
 from fedscale.cloud.fllibs import *
 from fedscale.cloud.gossip.gossip_channel_context import GossipClientConnections
-from fedscale.cloud.internal.tensorflow_model_adapter import \
-    TensorflowModelAdapter
+from fedscale.cloud.internal.tensorflow_model_adapter import TensorflowModelAdapter
 from fedscale.cloud.internal.torch_model_adapter import TorchModelAdapter
 from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
 
@@ -41,9 +42,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         logger.initiate_client_setting()
 
         self.num_iterations = num_iterations
-        self.model = None
         self.client_id = client_id
         self.executor_id = client_id
+        self.max_retries = 10
 
         self.training_sets = self.test_dataset = None
 
@@ -116,15 +117,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
     def init_control_communication(self):
         """creates a server on the client
         """
-
-        # simulation mode
-        # num_of_executors = 0
-        # for ip_numgpu in self.args.executor_configs.split("="):
-        #     ip, numgpu = ip_numgpu.split(':')
-        #     for numexe in numgpu.strip()[1:-1].split(','):
-        #         for _ in range(int(numexe.strip())):
-        #             num_of_executors += 1
-        # self.executors = list(range(num_of_executors))
 
         self.grpc_server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=20),
@@ -229,6 +221,23 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         client_len = min(min_replies * buffer_factor, len(clients_online)-1)
         return clients_online[:client_len]
 
+    def override_conf(self, config):
+        """ Override the variable arguments for different client
+
+        Args:
+            config (dictionary): The client runtime config.
+
+        Returns:
+            dictionary: Variable arguments for client runtime config.
+
+        """
+        default_conf = vars(self.args).copy()
+
+        for key in config:
+            default_conf[key] = config[key]
+
+        return Namespace(**default_conf)
+
     def train(self):
 
         # TODO should deal with a set number of iterations at a time
@@ -239,13 +248,12 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             'learning_rate': self.args.learning_rate,
         }
         client_conf = self.override_conf(train_config)
-        train_res = self.training_handler(
-            client_id=self.client_id, conf=client_conf, model=self.model)
+        train_res = self.training_handler(conf=client_conf, model_weights=self.model_adapter.get_weights())
 
         # use torchclient trainer
         return train_res
 
-    def training_handler(self, conf, model):
+    def training_handler(self, conf, model_weights):
         """Train model given client id
 
         Args:
@@ -256,8 +264,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             dictionary: The train result
 
         """
-        self.model_adapter.set_weights(model)
+        self.model_adapter.set_weights(model_weights)
         conf.tokenizer = tokenizer
+        conf.client_id = self.client_id
         client_data = self.training_sets if self.args.task == "rl" else \
             select_dataset(self.client_id, self.training_sets,
                            batch_size=conf.batch_size, args=self.args,
@@ -265,10 +274,74 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                            )
 
         # TODO figure out if current trainer handles set number of iterations at a time
-        train_res = self.get_client_trainer(self.args).train(
+        train_res = TorchClient(self.args).train(
             client_data=client_data, model=self.model_adapter.get_model(), conf=conf)
 
         return train_res
+
+    def train_and_monitor(self):
+        weights = None
+        for i in range(self.num_iterations):
+            if i > 0 and i % 10 == 0:
+                logging.info("Selecting neighbors to send weights too...")
+                neighbors = self.select_neighbors(min_replies=self.neighbor_threshold)
+                self.num_neighbors = len(neighbors)
+                target = self.num_neighbors
+                counter = 0
+                
+                while True:
+                    # get stubs from client communicator
+                    for neighbor in neighbors:
+                        retries = 0
+                        stub = self.client_communicator.stubs[neighbor]
+                        # retry max_retries times
+                        while retries < self.max_retries:
+                            try:
+                                logging.info(f"Requesting weights from client {neighbor}...")
+                                res = stub.REQUEST_WEIGHTS(
+                                    job_api_pb2.WeightRequest(
+                                        client_id=f"{self.client_id}",
+                                        executor_id=f"{self.executor_id}"
+                                    )
+                                )
+                                counter += 1
+                                break
+                            except Exception as e:
+                                logging.info(f"Failed to send request weights ping to {neighbor}, retrying...")
+                                time.sleep(0.1)
+                                retries += 1
+
+                        if retries == self.max_retries:
+                            target -= 1
+                        
+                    if counter >= target:
+                        break
+
+                # Wait for neighbors to send back weights
+                logging.info(f"Client {self.client_id} waiting to receive weights...")
+                while len(self.receive_events_queue) < int(self.model_updates_threshold * self.num_neighbors):
+                    time.sleep(0.1)
+
+                logging.info(f"Client {self.client_id} aggregating weights...")
+                self.model_weights = self.model_wrapper.get_weights()
+                # check queue
+                while self.receive_events_queue:
+                    client_id, executor_id, weights = self.receive_events_queue.popleft()
+
+                    # process event
+                    self.aggregate_weights_handler(weights)
+
+            # check queue
+            # if we have any requests to send out weights
+            while self.send_events_queue:
+                client_id, meta, data = self.send_events_queue.popleft()
+                # process event
+                if weights:
+                    self.client_send_weights_handler(
+                        client_id, weights)
+            
+            logging.info(f"Training iteration {i} of {self.num_iterations}")
+            weights = self.train()["update_weight"]
 
     def run(self):
         """
@@ -290,73 +363,19 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             time.sleep(2)
                 
         logging.info("Starting loop...")
-        while True:
-            neighbor = 0 if self.client_id == 1 else 1
-            logging.info(f"Pinging client {neighbor}...")
-            stub = self.client_communicator.stubs[0]
-            response = self.client_ping(stub)
+        # while True:
+        #     neighbor = 0 if self.client_id == 1 else 1
+        #     logging.info(f"Pinging client {neighbor}...")
+        #     stub = self.client_communicator.stubs[0]
+        #     response = self.client_ping(stub)
 
-            event = response.event
-            logging.info(event)
-            time.sleep(5)
+        #     event = response.event
+        #     logging.info(event)
+        #     time.sleep(5)
 
-        # self.training_sets, self.testing_sets = self.init_data()
-        # weights = None
+        #     break
 
-        # # TODO fix how training works
-        # # Should train a few batches at a time and check for intermitent events between
-
-        # # TODO (jeremy): implement retries
-        # for i in range(self.num_iterations):
-        #     if i > 0 and i % 10 == 0:
-        #         # TODO after a set number of iterations (e.g. 10), request weights from clients
-        #         # TODO: in the case of error
-        #         neighbors = self.select_neighbors(min_replies=self.neighbor_threshold)
-        #         self.num_neighbors = len(neighbors)
-        #         counter = 0
-        #         while True:
-        #             # get stubs from client communicator
-        #             for neighbor in neighbors:
-        #                 stub = self.client_communicator.stubs[neighbor]
-        #                 res = stub.REQUEST_WEIGHTS(
-        #                     job_api_pb2.WeightRequest(
-        #                         client_id=f"{self.client_id}",
-        #                         executor_id=f"{self.executor_id}"
-        #                     )
-        #                 )
-
-        #                 res_client_id = res.client_id
-        #                 res_exeuctor_id = res.executor_id
-        #                 # TODO: check for error
-        #                 counter += 1
-        #             if counter >= len(neighbors):
-        #                 break
-
-        #         # Wait for neighbors to send back weights
-        #         logging.info(f"Client {self.client_id} waiting to receive weights...")
-        #         while len(self.receive_events_queue) < int(self.model_updates_threshold * self.num_neighbors):
-        #             time.sleep(0.1)
-
-        #         logging.info(f"Client {self.client_id} aggregating weights...")
-        #         self.model_weights = self.model_wrapper.get_weights()
-        #         # check queue
-        #         while self.receive_events_queue:
-        #             client_id, executor_id, weights = self.receive_events_queue.popleft()
-
-        #             # process event
-        #             self.client_completion_handler(weights)
-
-
-        #     # check queue
-        #     # if we have any requests to send out weights
-        #     while self.send_events_queue:
-        #         client_id, meta, data = self.send_events_queue.popleft()
-        #         # process event
-        #         if weights:
-        #             self.client_send_weights_handler(
-        #                 client_id, weights)
-        #     weights = self.train()["update_weight"]
-
+        self.train_and_monitor()
         self.stop()
         pass
 
@@ -447,7 +466,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         return client_manager
 
-    def client_completion_handler(self, weights):
+    def aggregate_weights_handler(self, weights):
         """We may need to keep all updates from clients,
         if so, we need to append results to the cache
 
@@ -460,20 +479,20 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         #       'trained_size': count, 'wall_duration': time_cost, 'success': is_success 'utility': utility}
 
         # TODO Check if these is necessary
-        if self.args.gradient_policy in ['q-fedavg']:
-            self.client_training_results.append(results)
-        # Feed metrics to client sampler
-        self.stats_util_accumulator.append(results['utility'])
-        self.loss_accumulator.append(results['moving_loss'])
+        # if self.args.gradient_policy in ['q-fedavg']:
+        #     self.client_training_results.append(results)
+        # # Feed metrics to client sampler
+        # self.stats_util_accumulator.append(results['utility'])
+        # self.loss_accumulator.append(results['moving_loss'])
 
-        self.client_manager.register_feedback(results['client_id'], results['utility'],
-                                              auxi=math.sqrt(
-                                                  results['moving_loss']),
-                                              time_stamp=self.round,
-                                              duration=self.virtual_client_clock[results['client_id']]['computation'] +
-                                              self.virtual_client_clock[results['client_id']
-                                                                        ]['communication']
-                                              )
+        # self.client_manager.register_feedback(results['client_id'], results['utility'],
+        #                                       auxi=math.sqrt(
+        #                                           results['moving_loss']),
+        #                                       time_stamp=self.round,
+        #                                       duration=self.virtual_client_clock[results['client_id']]['computation'] +
+        #                                       self.virtual_client_clock[results['client_id']
+        #                                                                 ]['communication']
+        #                                       )
 
         # ================== Aggregate weights ======================
         self.update_lock.acquire()
@@ -573,25 +592,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         """Register the client information to neighbors
         """
         start_time = time.time()
-
-        # for stub in self.client_communicator.stubs:
-        #     while time.time() - start_time < 180:
-        #         try:
-        #             # TODO: I think this is finding the wrong port
-        #             response = stub.CLIENT_REGISTER(
-        #                 job_api_pb2.RegisterRequest(
-        #                     client_id=self.executor_id,
-        #                     executor_id=self.executor_id,
-        #                     executor_info=self.serialize_response(
-        #                         self.report_executor_info_handler())
-        #                 )
-        #             )
-        #             self.dispatch_worker_events(response)
-        #             break
-        #         except Exception as e:
-        #             logging.warning(
-        #                 f"Failed to connect to aggregator {e}. Will retry in 5 sec.")
-        #             time.sleep(5)
 
         while time.time() - start_time < 180:
             try:
