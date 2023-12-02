@@ -38,6 +38,7 @@ MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
 
 
 class Executor(job_api_pb2_grpc.JobServiceServicer):
+    # TODO: for debugging purposes, maybe lower the number of rounds so things finish quicker
     def __init__(self, args, num_iterations=100, client_id=0):
         logger.initiate_client_setting()
 
@@ -70,7 +71,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.receive_events_queue = collections.deque()
         self.send_events_queue = collections.deque()
         self.coordinator_events_queue = collections.deque()
-        self.waiting_for_start = False 
+        self.waiting_for_start = False
         # ======== Model and Data ========
         self.training_sets = self.test_dataset = None
         self.model_wrapper = None
@@ -95,10 +96,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.received_stop_request = False
 
         # ======== Wandb ========
-        if args.wandb_token != "":
+        if args.wandb_token:
             os.environ['WANDB_API_KEY'] = args.wandb_token
             self.wandb = wandb
-            if self.wandb.run is None:
+            if not self.wandb.run:
                 self.wandb.init(project=f'fedscale-{args.job_name}',
                                 name=f'executor{args.this_rank}-{args.time_stamp}',
                                 group=f'{args.time_stamp}')
@@ -204,18 +205,24 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     # TODO: maybe change variable names later since we're no including the model
     # weights in the RPC reply
-    def select_neighbors(self, min_replies, cur_time=0, buffer_factor=2):
+    # TODO: for testing purposes, just implement a version which selects everything
+    def select_neighbors(self, min_replies, cur_time=0, buffer=0):
         """Randomly select neighbors to request weights from. This should be
         some order of magnitude higher than the minimum amount of clients we
         want to receive weight updates from (e.g., if we want at least 5
         replies, then we should select 10 neighbors).
         """
 
-        clients_online = self.client_manager.getFeasibleClients(cur_time)
+        # TODO: handle edge cases:
+        # - Not enough clients in total to select from
+        # - Enough total clients, but not any other active ones that are selected
+
+        # clients_online = self.client_manager.getFeasibleClients(cur_time)
+        total_clients = self.
         rng = Random()
         rng.seed(233)
         rng.shuffle(clients_online)
-        client_len = min(min_replies * buffer_factor, len(clients_online)-1)
+        client_len = min(min_replies + buffer, len(clients_online)-1)
         return clients_online[:client_len]
 
     def override_conf(self, config):
@@ -280,7 +287,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 self.num_neighbors = len(neighbors)
                 target = self.num_neighbors
                 counter = 0
-                
+
                 while True:
                     # get stubs from client communicator
                     for neighbor in neighbors:
@@ -305,7 +312,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
                         if retries == self.max_retries:
                             target -= 1
-                        
+
                     if counter >= target:
                         break
 
@@ -332,7 +339,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 if weights:
                     self.client_send_weights_handler(
                         client_id, weights)
-            
+
             logging.info(f"Training iteration {i + 1} of {self.num_iterations}")
             weights = self.train()["update_weight"]
 
@@ -354,7 +361,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         while self.waiting_for_start:
             logging.info(f"Executor {self.client_id} waiting to start...")
             time.sleep(2)
-                
+
         logging.info("Starting loop...")
         # while True:
         #     neighbor = 0 if self.client_id == 1 else 1
@@ -431,7 +438,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         """
         self.send_events_queue.append(request)
-    
+
     def dispatch_coordinator_events(self, event):
         self.coordinator_events_queue.append(event)
 
@@ -550,7 +557,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             self.client_register_handler(executor_id, info)
             if len(self.registered_executor_info) == len(self.executors):
                 self.round_completion_handler()
-    
+
     def client_register_handler(self, executor_id, info):
         """Triggered once receive new executor registration.
 
@@ -590,8 +597,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         while time.time() - start_time < 180:
             try:
-                # is there a race condition where True is set after the response but 
-                # the aggregator has already broadcasted? 
+                # is there a race condition where True is set after the response but
+                # the aggregator has already broadcasted?
                 self.waiting_for_start = True
                 response = self.client_communicator.aggregator_stub.CLIENT_REGISTER(
                     job_api_pb2.RegisterRequest(
@@ -605,9 +612,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 break
             except Exception as e:
                 self.waiting_for_start = False
-
                 logging.warning(
-                    f"Failed to connect to aggregator {e}. Will retry in 5 sec.")
+                    f"Failed to connect to coordinator, with error:\n{e}\nWill retry in 5 sec.")
                 time.sleep(5)
 
     def CLIENT_REGISTER(self, request, context):
@@ -680,17 +686,27 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         return response
 
+    # This is called by the coordinator to either notify the client to:
+    # - Start training
+    # - Stop training and shut down
     def CLIENT_PING(self, request, context):
-        if self.waiting_for_start:
-            self.waiting_for_start = False
-        
-        executor_id, client_id = request.executor_id, request.client_id
-        logging.info(f"Received ping request from client {client_id}, executor {executor_id}")
+        event = request.event
+        if event == commons.START_ROUND:
+            num_executors = request.num_executors
 
-        response = job_api_pb2.ServerResponse(event=commons.GL_ACK,
-                                              meta=self.serialize_response("test"), data=self.serialize_response("test"))
+            if self.waiting_for_start:
+                self.waiting_for_start = False
 
-        return response
+            executor_id = request.executor_id
+            client_id = request.client_id
+            logging.info(f"Received ping request from client {client_id}, executor {executor_id}")
+
+            response = job_api_pb2.ServerResponse(event=commons.GL_ACK,
+                                                meta=self.serialize_response("test"), data=self.serialize_response("test"))
+
+            return response
+        elif event == commons.SHUT_DOWN:
+            self.received_stop_request = True
 
     def client_ping(self, stub):
         """Ping the aggregator for new task
