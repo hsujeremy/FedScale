@@ -35,7 +35,7 @@ from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
 Make a server for each client
 """
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
-AGGREGATION_FREQUENCY = 5 # Number of iterations between aggregation
+AGGREGATION_FREQUENCY = 5  # Number of iterations between aggregation
 
 DEFAULT_NUM_ITERATIONS = 10
 
@@ -214,6 +214,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         want to receive weight updates from (e.g., if we want at least 5
         replies, then we should select 10 neighbors).
         """
+        logging.info("Selecting neighbors to send weights too...")
 
         # TODO: handle edge cases:
         # - Not enough clients in total to select from
@@ -292,45 +293,42 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 neighbors = self.select_neighbors(
                     min_replies=self.neighbor_threshold)
                 self.num_neighbors = len(neighbors)
-                target = self.num_neighbors
-                counter = 0
 
-                while True:
-                    # get stubs from client communicator
-                    for neighbor in neighbors:
-                        retries = 0
-                        stub = self.client_communicator.stubs[neighbor]
-                        # retry max_retries times
-                        while retries < self.max_retries:
-                            try:
-                                logging.info(
-                                    f"Requesting weights from client {neighbor}...")
-                                res = stub.REQUEST_WEIGHTS(
-                                    job_api_pb2.WeightRequest(
-                                        client_id=f"{self.client_id}",
-                                        executor_id=f"{self.executor_id}"
-                                    )
+                for neighbor in neighbors:
+                    retries = 0
+                    stub = self.client_communicator.stubs[neighbor]
+
+                    # retry max_retries times
+                    while retries < self.max_retries:
+                        try:
+                            logging.info(
+                                f"Requesting weights from client {neighbor}...")
+                            stub.REQUEST_WEIGHTS(
+                                job_api_pb2.WeightRequest(
+                                    client_id=str(self.client_id),
+                                    executor_id=str(self.executor_id)
                                 )
-                                counter += 1
-                                break
-                            except Exception as e:
-                                logging.info(
-                                    f"Failed to send request weights ping to {neighbor} with exception {e}, retrying...")
-                                time.sleep(0.1)
-                                retries += 1
-
-                        if retries == self.max_retries:
-                            target -= 1
-
-                    if counter >= target:
-                        break
+                            )
+                            break
+                        except Exception as e:
+                            logging.info(
+                                f"Failed to send request weights ping to {neighbor} with exception {e}, retrying...")
+                            time.sleep(0.1)
+                            retries += 1
 
                 # Wait for neighbors to send back weights
                 # TODO replace temp placeholder with min_num_neighbors = int(self.model_updates_threshold * self.num_neighbors)
-                min_num_neighbors = self.num_neighbors
+                self.min_num_neighbors = self.num_neighbors
+                self.model_weights = self.model_wrapper.get_weights()
                 logging.info(
-                    f"Client {self.client_id} waiting to receive weights from {min_num_neighbors} neighbors")
-                while len(self.receive_events_queue) < min_num_neighbors:
+                    f"Client {self.client_id} waiting to receive weights from {self.min_num_neighbors} neighbors")
+                while self.model_in_update < self.min_num_neighbors:
+                    if self.receive_events_queue:
+                        client_id, received_weights = self.receive_events_queue.popleft()
+                        received_weights = self.deserialize_response(
+                            received_weights)
+                        self.aggregate_weights_handler(received_weights)
+
                     # check queue
                     # if we have any requests to send out weights
                     while self.send_events_queue:
@@ -339,17 +337,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                         if weights:
                             self.client_send_weights_handler(
                                 int(client_id), weights)
+
                     time.sleep(0.1)
 
-                logging.info(f"Client {self.client_id} aggregating weights...")
-                self.model_weights = self.model_wrapper.get_weights()
-                # check queue
-                while self.receive_events_queue:
-                    client_id, _, weights = self.receive_events_queue.popleft()
-
-                    # process event
-                    self.aggregate_weights_handler(
-                        self.deserialize_response(weights))
+                self.model_in_update = 0
 
             # check queue
             # if we have any requests to send out weights
@@ -453,14 +444,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         """
         self.receive_events_queue.append(
-            (request.client_id, request.executor_id, request.weights))
+            (request.client_id, request.weights))
 
     def dispatch_send_events(self, request):
         """Add new events to worker queue for receiving weights.
 
         Args:
             request (string): Add grpc request from server (e.g. MODEL_TEST, MODEL_TRAIN) to events_queue.
-
         """
         self.send_events_queue.append((request.client_id, request.executor_id))
 
@@ -499,29 +489,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         Args:
             results (dictionary): client's training result
-
         """
-        # Format:
-        #       -results = {'client_id':client_id, 'update_weight': model_param, 'moving_loss': round_train_loss,
-        #       'trained_size': count, 'wall_duration': time_cost, 'success': is_success 'utility': utility}
-
-        # TODO Check if these is necessary
-        # if self.args.gradient_policy in ['q-fedavg']:
-        #     self.client_training_results.append(results)
-        # # Feed metrics to client sampler
-        # self.stats_util_accumulator.append(results['utility'])
-        # self.loss_accumulator.append(results['moving_loss'])
-
-        # self.client_manager.register_feedback(results['client_id'], results['utility'],
-        #                                       auxi=math.sqrt(
-        #                                           results['moving_loss']),
-        #                                       time_stamp=self.round,
-        #                                       duration=self.virtual_client_clock[results['client_id']]['computation'] +
-        #                                       self.virtual_client_clock[results['client_id']
-        #                                                                 ]['communication']
-        #                                       )
-
-        # ================== Aggregate weights ======================
         self.update_lock.acquire()
 
         self.model_in_update += 1
@@ -545,7 +513,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             self.model_wrapper.set_weights(copy.deepcopy(self.model_weights))
 
     def _is_last_result_in_round(self):
-        return self.model_in_update == int(self.num_neighbors * self.model_updates_threshold)
+        return self.model_in_update == self.min_num_neighbors
 
     def report_executor_info_handler(self):
         """Return the statistics of training dataset
@@ -596,12 +564,14 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             # since the worker rankId starts from 1, we also configure the initial dataId as 1
             mapped_id = 1
             if self.client_profiles:
-                mapped_id = (self.num_of_clients + 1) % len(self.client_profiles)
+                mapped_id = (self.num_of_clients +
+                             1) % len(self.client_profiles)
 
             systemProfile = self.client_profiles.get(
                 mapped_id, {'computation': 1.0, 'communication': 1.0})
 
-            client_id = executor_id # interchangable since we're only putting one client per executor
+            # interchangable since we're only putting one client per executor
+            client_id = executor_id
             self.client_manager.register_client(
                 executor_id, client_id, size=_size, speed=systemProfile)
             self.client_manager.registerDuration(
