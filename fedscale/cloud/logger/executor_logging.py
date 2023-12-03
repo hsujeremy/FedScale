@@ -27,7 +27,7 @@ def init_logging(client_id=-1):
     handler.addFilter(Clientfilter(client_id))
     file_handler.addFilter(Clientfilter(client_id))
     logging.basicConfig(
-        format='CLIENT %(client)s - (asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
+        format='E%(client)s %(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
         datefmt='(%m-%d) %H:%M:%S',
         level=logging.INFO,
         handlers=[
