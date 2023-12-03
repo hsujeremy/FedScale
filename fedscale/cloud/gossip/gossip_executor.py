@@ -61,7 +61,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.num_executors = args.num_executors
 
         self.num_neighbors = 0
-        self.neighbor_threshold = 0.7
+        self.neighbor_threshold = 0.5
         self.model_updates_threshold = 0.7
 
         self.device = args.cuda_device if args.use_cuda else torch.device(
@@ -97,6 +97,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.round = 0
         self.start_run_time = time.time()
         self.received_stop_request = False
+        self.rng = Random()
+        self.rng.seed(233)
 
         # ======== Wandb ========
         if args.wandb_token:
@@ -206,30 +208,30 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         return training_sets, testing_sets
 
-    # TODO: maybe change variable names later since we're no including the model
+    # TODO: maybe change variable names later since we're not including the model
     # weights in the RPC reply
-    def select_neighbors(self, min_replies, cur_time=0, buffer=0):
-        """Randomly select neighbors to request weights from. This should be
-        some order of magnitude higher than the minimum amount of clients we
-        want to receive weight updates from (e.g., if we want at least 5
-        replies, then we should select 10 neighbors).
+    def select_neighbors(self, min_replies, buffer_factor=1):
+        """Randomly select neighbors to request weights from.
+
+        TODO: handle edge cases:
+        - Not enough clients in total to select from
+        - Enough total clients, but not any other active ones that are selected
+
+        Args:
+            min_replies (float): The target minimum threshold for replies,
+                represented as a percentage of the total number of clients.
+            buffer_factor (int): Multiplier for the amount of buffer to add to
+                the minimum number of replies, in case some of them fail.
+
+        Returns:
+            list: The list of neighbors to request weights from.
         """
         logging.info("Selecting neighbors to send weights too...")
-
-        # TODO: handle edge cases:
-        # - Not enough clients in total to select from
-        # - Enough total clients, but not any other active ones that are selected
-
-        # clients_online = self.client_manager.getFeasibleClients(cur_time)
-        # rng = Random()
-        # rng.seed(233)
-        # rng.shuffle(clients_online)
-        # client_len = min(min_replies + buffer, len(clients_online)-1)
-        # return clients_online[:client_len]
-
-        # For now, just return everything
         total_executors = list(range(self.num_executors))
-        return [i for i in total_executors if i != self.client_id]
+        candidates = [i for i in total_executors if i != self.client_id]
+        self.rng.shuffle(candidates)
+        num_neighbors = int(len(candidates) * min_replies * buffer_factor)
+        return candidates[:num_neighbors]
 
     def override_conf(self, config):
         """ Override the variable arguments for different client
