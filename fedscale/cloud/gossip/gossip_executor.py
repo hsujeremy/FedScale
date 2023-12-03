@@ -35,11 +35,14 @@ from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
 Make a server for each client
 """
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
+AGGREGATION_FREQUENCY = 5 # Number of iterations between aggregation
+
+DEFAULT_NUM_ITERATIONS = 10
 
 
 class Executor(job_api_pb2_grpc.JobServiceServicer):
     # TODO: for debugging purposes, maybe lower the number of rounds so things finish quicker
-    def __init__(self, args, num_iterations=100, client_id=0):
+    def __init__(self, args, num_iterations=DEFAULT_NUM_ITERATIONS, client_id=0):
         logger.initiate_client_setting()
 
         self.num_iterations = num_iterations
@@ -284,7 +287,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
     def train_and_monitor(self):
         weights = None
         for i in range(self.num_iterations):
-            if i > 0 and i % 10 == 0:
+            if i > 0 and i % AGGREGATION_FREQUENCY == 0:
                 logging.info("Selecting neighbors to send weights too...")
                 neighbors = self.select_neighbors(
                     min_replies=self.neighbor_threshold)
@@ -590,13 +593,14 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         logging.info(f"Loading {len(info['size'])} client traces ...")
         for _size in info['size']:
             # since the worker rankId starts from 1, we also configure the initial dataId as 1
-            mapped_id = (self.num_of_clients + 1) % len(
-                self.client_profiles) if len(self.client_profiles) > 0 else 1
+            mapped_id = 1
+            if self.client_profiles:
+                mapped_id = (self.num_of_clients + 1) % len(self.client_profiles)
+
             systemProfile = self.client_profiles.get(
                 mapped_id, {'computation': 1.0, 'communication': 1.0})
 
-            client_id = (
-                self.num_of_clients + 1) if self.experiment_mode == commons.SIMULATION_MODE else executor_id
+            client_id = executor_id # interchangable since we're only putting one client per executor
             self.client_manager.register_client(
                 executor_id, client_id, size=_size, speed=systemProfile)
             self.client_manager.registerDuration(
