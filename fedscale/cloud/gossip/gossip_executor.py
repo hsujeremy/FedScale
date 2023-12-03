@@ -43,7 +43,7 @@ DEFAULT_NUM_ITERATIONS = 10
 class Executor(job_api_pb2_grpc.JobServiceServicer):
     # TODO: for debugging purposes, maybe lower the number of rounds so things finish quicker
     def __init__(self, args, num_iterations=DEFAULT_NUM_ITERATIONS, client_id=0):
-        logger.initiate_client_setting()
+        logger.initiate_client_setting(client_id)
 
         self.num_iterations = num_iterations
         self.client_id = client_id
