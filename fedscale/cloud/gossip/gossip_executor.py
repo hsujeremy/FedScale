@@ -721,9 +721,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         if self.waiting_for_start:
             self.waiting_for_start = False
 
-        executor_id, client_id = request.executor_id, request.client_id
+        executor_id = request.executor_id
+        client_id = request.client_id
+        num_executors = request.num_executors
+
         logging.info(
-            f"Received ping request from client {client_id}, executor {executor_id}")
+            f"Received ping from coordinator, setting num_executors: {num_executors}")
+        self.num_executors = num_executors
         response = job_api_pb2.ServerResponse(event=commons.GL_ACK,
                                               meta=self.serialize_response("test"), data=self.serialize_response("test"))
         return response

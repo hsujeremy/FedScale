@@ -41,7 +41,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         self.connection_timeout = self.args.connection_timeout
         self.executors = None
         self.grpc_server = None
-        print(args.num_executors)
+        print('Coordinator expecting {} executors'.format(args.num_executors))
         self.client_communicator = GossipClientConnections(
             args.ps_ip, -1, args.num_executors, is_coordinator=True)
 
@@ -247,7 +247,8 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
                 try:
                     response = stub.CLIENT_PING(job_api_pb2.PingRequest(
                         client_id=str(i),
-                        executor_id=str(i)
+                        executor_id=str(i),
+                        num_executors=str(self.args.num_executors)
                     ))
                 except:
                     logging.info(f"Failed to start client {i}")

@@ -29,7 +29,7 @@ message PingRequest {
     string client_id = 1;
     string executor_id = 2;
     string event = 3;
-    int num_executors = 4;
+    string num_executors = 4;
 }
 
 message CompleteRequest {
