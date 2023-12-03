@@ -43,7 +43,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         self.grpc_server = None
         print('Coordinator expecting {} executors'.format(args.num_executors))
         self.client_communicator = GossipClientConnections(
-            args.ps_ip, -1, args.num_executors, is_coordinator=True)
+            args.ps_ip, -1, is_coordinator=True)
 
         # ======== Event Queue ========
         self.individual_client_events = {}  # Unicast
@@ -162,7 +162,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
 
         self.grpc_server.add_insecure_port(port)
         self.grpc_server.start()
-        self.client_communicator.connect_to_servers()
+        self.client_communicator.connect_to_executors(self.args.num_executors)
 
     def client_register_handler(self, executor_id, info):
         """Triggered once receive new executor registration.

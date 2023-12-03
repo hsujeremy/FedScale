@@ -74,7 +74,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.receive_events_queue = collections.deque()
         self.send_events_queue = collections.deque()
         self.coordinator_events_queue = collections.deque()
-        self.waiting_for_start = False
+        self.waiting_for_start = True
         # ======== Model and Data ========
         self.training_sets = self.test_dataset = None
         self.model_wrapper = None
@@ -90,7 +90,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         # ======== channels ========
         self.client_communicator = GossipClientConnections(
-            args.ps_ip, client_id, ports=args.num_executors)
+            args.ps_ip, client_id)
 
         # ======== runtime information ========
         self.collate_fn = None
@@ -136,7 +136,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.grpc_server.add_insecure_port(port)
         self.grpc_server.start()
-        self.client_communicator.connect_to_servers()
+        self.client_communicator.connect_to_coordinator()
 
     # TODO Figure out diff between adapter vs client and init_model vs get_client_trainer
     def init_model(self):
@@ -383,6 +383,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             logging.info(f"Executor {self.client_id} waiting to start...")
             time.sleep(2)
 
+        self.client_communicator.connect_to_executors(self.num_executors)
         logging.info("Starting loop...")
         # while True:
         #     neighbor = 0 if self.client_id == 1 else 1
@@ -723,7 +724,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         executor_id = request.executor_id
         client_id = request.client_id
-        num_executors = request.num_executors
+        num_executors = int(request.num_executors)
 
         logging.info(
             f"Received ping from coordinator, setting num_executors: {num_executors}")
