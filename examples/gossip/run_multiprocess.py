@@ -36,8 +36,6 @@ def main():
         executor_process.start()
         executor_processes.append(executor_process)
 
-    time.sleep(10)
-
     cdtr_process.join()
     for executor_process in executor_processes:
         executor_process.join()
