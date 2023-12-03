@@ -220,16 +220,18 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         """Activate event handler according to the received new message
         """
         logging.info("Start monitoring events ...")
-
-        # TODO: figure out what events to monitor - we don't send, so only sever events
-        while True:
-            # Broadcast events to clients
-            if len(self.broadcast_events_queue) > 0:
-                current_event = self.broadcast_events_queue.popleft()
-                self.dispatch_client_events(current_event)
-            else:
-                # execute every 100 ms
-                time.sleep(0.1)
+        try:
+            while True:
+                # Broadcast events to clients
+                if len(self.broadcast_events_queue) > 0:
+                    current_event = self.broadcast_events_queue.popleft()
+                    self.dispatch_client_events(current_event)
+                else:
+                    # execute every 100 ms
+                    time.sleep(0.1)
+        except KeyboardInterrupt:
+            logging.info("KeyboardInterrupt: stopping the coordinator and all executors ...")
+            self.dispatch_client_events(commons.SHUT_DOWN)
 
     def dispatch_client_events(self, event, clients=None):
         """Issue tasks (events) to clients
@@ -239,19 +241,16 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
             clients (list of int): target client ids for event.
 
         """
-        # start training for all clients
-        if event == commons.START_ROUND:
-            self.stubs = self.client_communicator.stubs
-
-            for i, stub in enumerate(self.stubs):
-                try:
-                    response = stub.CLIENT_PING(job_api_pb2.PingRequest(
-                        client_id=str(i),
-                        executor_id=str(i),
-                        num_executors=str(self.args.num_executors)
-                    ))
-                except:
-                    logging.info(f"Failed to start client {i}")
+        for i, stub in enumerate(self.client_communicator.stubs):
+            try:
+                response = stub.CLIENT_PING(job_api_pb2.PingRequest(
+                    client_id=str(i),
+                    executor_id=str(i),
+                    event=event,
+                    num_executors=str(self.args.num_executors)
+                ))
+            except:
+                logging.info(f"Failed to ping client {i} with event {event}")
 
     def deserialize_response(self, responses):
         """Deserialize the response from executor
