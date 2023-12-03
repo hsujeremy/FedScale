@@ -37,9 +37,9 @@ from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
 Make a server for each client
 """
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
-AGGREGATION_FREQUENCY = 5  # Number of iterations between aggregation
+AGGREGATION_FREQUENCY = 3  # Number of iterations between aggregation
 
-DEFAULT_NUM_ITERATIONS = 10
+DEFAULT_NUM_ITERATIONS = 15
 
 
 class Executor(job_api_pb2_grpc.JobServiceServicer):
@@ -252,15 +252,15 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         return Namespace(**default_conf)
 
-    def test(self, config):
+    def test(self, testing_round, config):
         """Model Testing. By default, we test the accuracy on all data of clients in the test group
 
         Args:
             config (dictionary): The client testing config.
         """
-        self.testing_handler()
+        self.testing_handler(testing_round)
 
-    def testing_handler(self):
+    def testing_handler(self, testing_round):
         """Test model
 
         Args:
@@ -282,12 +282,12 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                      isTest=True, collate_fn=self.collate_fn)
 
         test_results = client.test(data_loader, model, test_config)
-        self.log_test_result(test_results)
+        self.log_test_result(test_results, testing_round)
         gc.collect()
 
         return test_results
 
-    def log_test_result(self, test_res):
+    def log_test_result(self, test_res, testing_round):
         """Log test results to wandb server if enabled
 
         Args:
@@ -302,14 +302,14 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 'Test/round_to_top1_accuracy': acc,
                 'Test/round_to_top5_accuracy': acc_5,
                 'Test/round_to_loss': test_loss,
-            }, step=self.round)
+            }, step=testing_round)
 
             # Reporting metrics relative to total time
             self.wandb.log({
                 'Test/time_to_top1_accuracy': acc,
                 'Test/time_to_top5_accuracy': acc_5,
                 'Test/time_to_loss': test_loss,
-            }, step=self.global_virtual_clock/60)
+            }, step=int(self.global_virtual_clock/60))
 
     def train(self):
         train_config = {
@@ -400,17 +400,17 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
                 self.model_in_update = 0
 
+                # Run test/evaluation on the model after trainig round
+                self.global_virtual_clock += time.time() - round_start_time
+                self.test(testing_round=i//AGGREGATION_FREQUENCY-1, config=None)
+                # Reset round start time after testing is complete
+                round_start_time = time.time()
+
             self.unload_send_queue(weights)
 
             logging.info(
                 f"Training iteration {i + 1} of {self.num_iterations}")
             weights = self.train()["update_weight"]
-
-            # Run test/evaluation on the model after trainig round
-            self.global_virtual_clock += time.time() - round_start_time
-            self.test(config=None)
-            # Reset round start time after testing is complete
-            round_start_time = time.time()
 
     def run(self):
         """
@@ -792,7 +792,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     def stop(self):
         self.grpc_server.stop(None)
-        logging.info(f"Teminating client {self.client_id}")
+        if self.wandb != None:
+            self.wandb.finish()
+        logging.info(f"Terminating client {self.client_id}")
 
 
 if __name__ == "__main__":
