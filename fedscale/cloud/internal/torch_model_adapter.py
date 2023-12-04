@@ -42,7 +42,7 @@ class TorchModelAdapter(ModelAdapterBase):
         contains the model's first layer weights, and index N contains the N+1 layer's weights.
         :return: A numpy array
         """
-        return [params.data.clone() for params in self.model.state_dict().values()]
+        return [params.data.cpu().data.numpy() for params in self.model.state_dict().values()]
 
     def get_model(self):
         """

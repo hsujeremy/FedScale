@@ -371,7 +371,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                             stub.REQUEST_WEIGHTS(
                                 job_api_pb2.WeightRequest(
                                     client_id=str(self.client_id),
-                                    executor_id=str(self.executor_id)
+                                    curr_round=i,
                                 )
                             )
                             break
@@ -389,7 +389,11 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                     f"Client {self.client_id} waiting to receive weights from {self.min_num_neighbors} neighbors")
                 while self.model_in_update < self.min_num_neighbors:
                     if self.receive_events_queue:
-                        client_id, received_weights = self.receive_events_queue.popleft()
+                        client_id, incoming_round, received_weights = self.receive_events_queue.popleft()
+                        if incoming_round != i:
+                            logging.info(
+                                f"Received weights from client {client_id} for round {incoming_round}, but we're on round {i}. Skipping...")
+                            continue
                         received_weights = self.deserialize_response(
                             received_weights)
                         self.aggregate_weights_handler(received_weights)
@@ -402,7 +406,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
                 # Run test/evaluation on the model after trainig round
                 self.global_virtual_clock += time.time() - round_start_time
-                self.test(testing_round=i//AGGREGATION_FREQUENCY-1, config=None)
+                self.test(testing_round=i //
+                          AGGREGATION_FREQUENCY-1, config=None)
                 # Reset round start time after testing is complete
                 round_start_time = time.time()
 
@@ -471,7 +476,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         """
         return pickle.dumps(responses)
 
-    def client_send_weights_handler(self, client_id, train_res):
+    def client_send_weights_handler(self, client_id, curr_round, weights):
         """Uploads model to client at client_id.
 
         Args:
@@ -482,12 +487,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         logging.info(f"Sending weights to client {client_id}")
 
         # Send model to client
+        weights = self.serialize_response(weights)
+
         # TODO figure out if we should implement using futures
         future_call = self.client_communicator.stubs[client_id].UPLOAD_WEIGHTS(
             job_api_pb2.UploadWeightRequest(client_id=str(self.client_id),
-                                            executor_id=str(self.executor_id),
-                                            weights=self.serialize_response(
-                                                train_res)
+                                            curr_round=curr_round,
+                                            weights=weights
                                             ))
         # future_call.add_done_callback(
         #     lambda _response: self.dispatch_worker_events(_response.result()))
@@ -500,7 +506,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         """
         self.receive_events_queue.append(
-            (request.client_id, request.weights))
+            (request.client_id, request.curr_round, request.weights))
 
     def dispatch_send_events(self, request):
         """Add new events to worker queue for receiving weights.
@@ -508,7 +514,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         Args:
             request (string): Add grpc request from server (e.g. MODEL_TEST, MODEL_TRAIN) to events_queue.
         """
-        self.send_events_queue.append(request.client_id)
+        self.send_events_queue.append((request.client_id, request.curr_round))
 
     def dispatch_coordinator_events(self, event):
         self.coordinator_events_queue.append(event)
@@ -517,10 +523,11 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         # check queue
         # if we have any requests to send out weights
         while self.send_events_queue:
-            client_id = self.send_events_queue.popleft()
+            client_id, curr_round = self.send_events_queue.popleft()
             # process event
             if weights:
-                self.client_send_weights_handler(int(client_id), weights)
+                self.client_send_weights_handler(
+                    int(client_id), curr_round, weights)
 
     def init_client_manager(self, args):
         """ Initialize client sampler

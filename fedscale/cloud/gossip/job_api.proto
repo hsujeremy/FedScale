@@ -44,11 +44,11 @@ message CompleteRequest {
 
 message UploadWeightRequest {
     string client_id = 1;
-    string executor_id = 2;
+    int32 curr_round = 2;
     bytes weights = 3;
 }
 
 message WeightRequest {
     string client_id = 1;
-    string executor_id = 2;
+    int32 curr_round = 2;
 }

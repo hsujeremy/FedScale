@@ -13,7 +13,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rjob_api.proto\x12\x08\x66\x65\x64scale\";\n\x0eServerResponse\x12\r\n\x05\x65vent\x18\x01 \x01(\t\x12\x0c\n\x04meta\x18\x02 \x01(\x0c\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"P\n\x0fRegisterRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\x15\n\rexecutor_info\x18\x03 \x01(\x0c\"[\n\x0bPingRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\r\n\x05\x65vent\x18\x03 \x01(\t\x12\x15\n\rnum_executors\x18\x04 \x01(\t\"\x8f\x01\n\x0f\x43ompleteRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\r\n\x05\x65vent\x18\x03 \x01(\t\x12\x0e\n\x06status\x18\x04 \x01(\x08\x12\x0b\n\x03msg\x18\x05 \x01(\t\x12\x13\n\x0bmeta_result\x18\x06 \x01(\t\x12\x13\n\x0b\x64\x61ta_result\x18\x07 \x01(\x0c\"N\n\x13UploadWeightRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\x0f\n\x07weights\x18\x03 \x01(\x0c\"7\n\rWeightRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t2\x81\x03\n\nJobService\x12H\n\x0f\x43LIENT_REGISTER\x12\x19.fedscale.RegisterRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12@\n\x0b\x43LIENT_PING\x12\x15.fedscale.PingRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12R\n\x19\x43LIENT_EXECUTE_COMPLETION\x12\x19.fedscale.CompleteRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12\x46\n\x0fREQUEST_WEIGHTS\x12\x17.fedscale.WeightRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12K\n\x0eUPLOAD_WEIGHTS\x12\x1d.fedscale.UploadWeightRequest\x1a\x18.fedscale.ServerResponse\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rjob_api.proto\x12\x08\x66\x65\x64scale\";\n\x0eServerResponse\x12\r\n\x05\x65vent\x18\x01 \x01(\t\x12\x0c\n\x04meta\x18\x02 \x01(\x0c\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"P\n\x0fRegisterRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\x15\n\rexecutor_info\x18\x03 \x01(\x0c\"[\n\x0bPingRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\r\n\x05\x65vent\x18\x03 \x01(\t\x12\x15\n\rnum_executors\x18\x04 \x01(\t\"\x8f\x01\n\x0f\x43ompleteRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\r\n\x05\x65vent\x18\x03 \x01(\t\x12\x0e\n\x06status\x18\x04 \x01(\x08\x12\x0b\n\x03msg\x18\x05 \x01(\t\x12\x13\n\x0bmeta_result\x18\x06 \x01(\t\x12\x13\n\x0b\x64\x61ta_result\x18\x07 \x01(\x0c\"M\n\x13UploadWeightRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x12\n\ncurr_round\x18\x02 \x01(\x05\x12\x0f\n\x07weights\x18\x03 \x01(\x0c\"6\n\rWeightRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x12\n\ncurr_round\x18\x02 \x01(\x05\x32\x81\x03\n\nJobService\x12H\n\x0f\x43LIENT_REGISTER\x12\x19.fedscale.RegisterRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12@\n\x0b\x43LIENT_PING\x12\x15.fedscale.PingRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12R\n\x19\x43LIENT_EXECUTE_COMPLETION\x12\x19.fedscale.CompleteRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12\x46\n\x0fREQUEST_WEIGHTS\x12\x17.fedscale.WeightRequest\x1a\x18.fedscale.ServerResponse\"\x00\x12K\n\x0eUPLOAD_WEIGHTS\x12\x1d.fedscale.UploadWeightRequest\x1a\x18.fedscale.ServerResponse\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -29,9 +29,9 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['_COMPLETEREQUEST']._serialized_start=264
   _globals['_COMPLETEREQUEST']._serialized_end=407
   _globals['_UPLOADWEIGHTREQUEST']._serialized_start=409
-  _globals['_UPLOADWEIGHTREQUEST']._serialized_end=487
-  _globals['_WEIGHTREQUEST']._serialized_start=489
-  _globals['_WEIGHTREQUEST']._serialized_end=544
-  _globals['_JOBSERVICE']._serialized_start=547
-  _globals['_JOBSERVICE']._serialized_end=932
+  _globals['_UPLOADWEIGHTREQUEST']._serialized_end=486
+  _globals['_WEIGHTREQUEST']._serialized_start=488
+  _globals['_WEIGHTREQUEST']._serialized_end=542
+  _globals['_JOBSERVICE']._serialized_start=545
+  _globals['_JOBSERVICE']._serialized_end=930
 # @@protoc_insertion_point(module_scope)
