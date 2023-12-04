@@ -406,11 +406,11 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 # Reset round start time after testing is complete
                 round_start_time = time.time()
 
-            self.unload_send_queue(weights)
-
             logging.info(
                 f"Training iteration {i + 1} of {self.num_iterations}")
             weights = self.train()["update_weight"]
+
+            self.unload_send_queue(weights)
 
     def run(self):
         """
@@ -447,7 +447,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.train_and_monitor()
         self.stop()
-        pass
 
     def deserialize_response(self, responses):
         """Deserialize the response from executor
@@ -675,34 +674,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 logging.warning(
                     f"Failed to connect to coordinator, with error:\n{e}\nWill retry in 5 sec.")
                 time.sleep(5)
-
-    def CLIENT_REGISTER(self, request, context):
-        """FL TorchClient register to the aggregator
-
-        Args:
-            request (RegisterRequest): Registeration request info from executor.
-
-        Returns:
-            ServerResponse: Server response to registeration request
-
-        """
-        pass
-        # NOTE: client_id = executor_id in deployment,
-        # while multiple client_id uses the same executor_id (VMs) in simulations
-        executor_id = request.executor_id
-        executor_info = self.deserialize_response(request.executor_info)
-        if executor_id not in self.individual_client_events:
-            # logging.info(f"Detect new client: {executor_id}, executor info: {executor_info}")
-            self.individual_client_events[executor_id] = collections.deque()
-        else:
-            logging.info(f"Previous client: {executor_id} resumes connecting")
-
-        # We can customize whether to admit the clients here
-        self.executor_info_handler(executor_id, executor_info)
-        dummy_data = self.serialize_response(commons.DUMMY_RESPONSE)
-
-        return job_api_pb2.ServerResponse(event=commons.DUMMY_EVENT,
-                                          meta=dummy_data, data=dummy_data)
 
     def REQUEST_WEIGHTS(self, request, context):
         """Handle incoming requests for model weights.
