@@ -55,6 +55,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
 
         # ======== Runtime Information ========
         self.registered_executor_info = set()
+        self.finished_clients = set()
         self.num_of_clients = 0
         self.model_update_size = 0
 
@@ -226,6 +227,9 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
                 if len(self.broadcast_events_queue) > 0:
                     current_event = self.broadcast_events_queue.popleft()
                     self.dispatch_client_events(current_event)
+                    
+                    if len(self.finished_clients) == len(self.executors):
+                        self.stop()
                 else:
                     # execute every 100 ms
                     time.sleep(0.1)
@@ -330,6 +334,14 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
 
         """
         return {'client_id': client_id}
+    
+    def handle_client_finish(self, client_id):
+        self.finished_clients.add(client_id)
+
+        if len(self.finished_clients) == len(self.executors):
+            logging.info("All clients finished! Broadcasting stop...")
+            # TODO: also tell the executors how many executors in total there are
+            self.broadcast_aggregator_events(commons.END_ROUND)
 
     def CLIENT_REGISTER(self, request, context):
         """FL TorchClient register to the aggregator
@@ -373,20 +385,25 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         # NOTE: client_id = executor_id in deployment,
         # while multiple client_id may use the same executor_id (VMs) in simulations
         executor_id, client_id = request.executor_id, request.client_id
+        event = request.event
         response_data = response_msg = commons.DUMMY_RESPONSE
         current_event = commons.DUMMY_EVENT
 
-        if self.individual_client_events[executor_id]:
-            current_event = self.individual_client_events[executor_id].popleft(
-            )
-            if current_event == commons.START_ROUND:
-                # TODO This should function as a start training event
-                response_msg, response_data = self.create_client_task(
-                    executor_id)
-            elif current_event == commons.MODEL_TEST:
-                response_msg = self.get_test_config(client_id)
-            elif current_event == commons.SHUT_DOWN:
-                response_msg = self.get_shutdown_config(executor_id)
+        if event == commons.CLIENT_FINISH:
+            self.handle_client_finish(client_id)
+            current_event = commons.GL_ACK
+
+        # if self.individual_client_events[executor_id]:
+        #     current_event = self.individual_client_events[executor_id].popleft(
+        #     )
+        #     if current_event == commons.START_ROUND:
+        #         # TODO This should function as a start training event
+        #         response_msg, response_data = self.create_client_task(
+        #             executor_id)
+        #     elif current_event == commons.MODEL_TEST:
+        #         response_msg = self.get_test_config(client_id)
+        #     elif current_event == commons.SHUT_DOWN:
+        #         response_msg = self.get_shutdown_config(executor_id)
 
         response_msg, response_data = self.serialize_response(
             response_msg), self.serialize_response(response_data)
@@ -404,6 +421,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
             TODO: wandb logging
         """
         logging.info(f"Terminating the aggregator ...")
+        self.grpc_server.stop(None)
         if self.wandb != None:
             self.wandb.finish()
         time.sleep(5)

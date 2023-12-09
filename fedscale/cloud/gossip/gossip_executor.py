@@ -55,6 +55,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.training_sets = self.test_dataset = None
 
+        self.weights = None
+
         # init model weights here? training config contains model weights under "model"
         # model weights are stored under self.model_adapter.get_weights
         self.model_adapter = self.get_client_trainer(
@@ -78,6 +80,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.send_events_queue = collections.deque()
         self.coordinator_events_queue = collections.deque()
         self.waiting_for_start = True
+        self.waiting_for_end = True
         # ======== Model and Data ========
         self.training_sets = self.test_dataset = None
         self.model_wrapper = None
@@ -283,6 +286,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                      batch_size=self.args.test_bsz, args=self.args,
                                      isTest=True, collate_fn=self.collate_fn)
 
+        logging.info(f"Testing dataloader length: {data_loader}")
         test_results = client.test(data_loader, model, test_config)
         self.log_test_result(test_results, testing_round)
         gc.collect()
@@ -349,6 +353,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                            collate_fn=self.collate_fn
                            )
 
+        logging.info(f"Training dataloader length: {len(client_data)}")
         train_res = TorchClient(self.args).train(
             client_data=client_data, model=self.model_adapter.get_model(), conf=conf)
 
@@ -403,8 +408,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                             continue
                         received_weights = self.deserialize_response(
                             received_weights)
+                        logging.info(f"Aggregating weights from client {client_id}")
                         self.aggregate_weights_handler(received_weights)
 
+                    logging.info("Unloading send queue")
                     self.unload_send_queue(weights)
 
                     time.sleep(0.1)
@@ -413,6 +420,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
                 # Run test/evaluation on the model after trainig round
                 self.global_virtual_clock += time.time() - round_start_time
+                logging.info(f"Testing client {self.client_id}")
                 self.test(testing_round=i //
                           AGGREGATION_FREQUENCY-1, config=None)
                 # Reset round start time after testing is complete
@@ -421,8 +429,14 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             logging.info(
                 f"Training iteration {i + 1} of {self.num_iterations}")
             weights = self.train()["update_weight"]
+            self.weights = weights
 
             self.unload_send_queue(weights)
+    
+    def listen_and_send(self):
+        while self.waiting_for_end:
+            self.unload_send_queue(self.weights)
+            time.sleep(0.1)
 
     def run(self):
         """
@@ -445,19 +459,16 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.client_communicator.connect_to_executors(self.num_executors)
         logging.info("Starting loop...")
-        # while True:
-        #     neighbor = 0 if self.client_id == 1 else 1
-        #     logging.info(f"Pinging client {neighbor}...")
-        #     stub = self.client_communicator.stubs[0]
-        #     response = self.client_ping(stub)
-
-        #     event = response.event
-        #     logging.info(event)
-        #     time.sleep(5)
-
-        #     break
 
         self.train_and_monitor()
+
+        logging.info("Sending client finish to coordinator...")
+        self.coordinator_ping(event=commons.CLIENT_FINISH)
+        logging.info("Listening and sending...")
+        self.listen_and_send()
+
+        logging.info("Stopping...")
+
         self.stop()
 
     def deserialize_response(self, responses):
@@ -525,6 +536,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     def dispatch_coordinator_events(self, event):
         self.coordinator_events_queue.append(event)
+
+    def unload_receive_queue(self):
+        pass
 
     def unload_send_queue(self, weights):
         # check queue
@@ -747,6 +761,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
             logging.info(
                 f"Received start ping from coordinator, setting num_executors: {self.num_executors}")
+        elif event == commons.END_ROUND:
+            logging.info(f"Receiving stop round ping from coordinator, stopping listening for events")
+            self.waiting_for_end = False
         elif event == commons.SHUT_DOWN:
             self.received_stop_request = True
             logging.info(
@@ -774,6 +791,20 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                                   meta=self.serialize_response("test"), data=self.serialize_response("test"))
             return response
         # self.dispatch_worker_events(response)
+
+    def coordinator_ping(self, event):
+        try:
+            response = self.client_communicator.aggregator_stub.CLIENT_PING(job_api_pb2.PingRequest(
+                    client_id=str(self.client_id),
+                    executor_id=str(self.executor_id),
+                    event=str(event),
+                    num_executors=str(self.num_executors)
+                )
+            )
+        except:
+            response = job_api_pb2.ServerResponse(event="Failed to connect to aggregator.",
+                                                  meta=self.serialize_response("test"), data=self.serialize_response("test"))
+            return response
 
     def stop(self):
         self.grpc_server.stop(None)
