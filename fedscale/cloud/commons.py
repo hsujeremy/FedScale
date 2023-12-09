@@ -19,6 +19,7 @@ GL_ACK = 'ack'
 
 # Client A sends GL_REQUEST_WEIGHTS to client B to get weights back
 GL_REQUEST_WEIGHTS = "request_weights"
+GL_REQUEST_NEIGHBORS = "request_neighbors"
 
 # PLACEHOLD
 DUMMY_RESPONSE = 'N'

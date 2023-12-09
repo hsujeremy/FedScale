@@ -246,6 +246,130 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
             except:
                 logging.info(f"Failed to ping client {i} with event {event}")
 
+    def update_default_task_config(self):
+        """Update the default task configuration after each round
+        """
+        if self.round % self.args.decay_round == 0:
+            self.args.learning_rate = max(
+                self.args.learning_rate * self.args.decay_factor, self.args.min_learning_rate)
+
+    def round_completion_handler(self):
+        """Triggered upon the round completion, it registers the last round execution info,
+        broadcast new tasks for executors and select clients for next round.
+        """
+        last_round_avg_util = sum(
+            self.stats_util_accumulator) / max(1, len(self.stats_util_accumulator))
+        # assign avg reward to explored, but not ran workers
+        for client_id in self.round_stragglers:
+            self.client_manager.register_feedback(client_id, last_round_avg_util,
+                                                  time_stamp=self.round,
+                                                  duration=self.virtual_client_clock[client_id]['computation'] +
+                                                  self.virtual_client_clock[client_id]['communication'],
+                                                  success=False)
+
+        # update select participants
+        self.sampled_participants = self.select_participants(
+            cur_time=1, select_num_participants=self.args.num_participants, overcommitment=self.args.overcommitment)
+        (clients_to_run, round_stragglers, virtual_client_clock, round_duration,
+         flatten_client_duration) = self.tictak_client_tasks(
+            self.sampled_participants, self.args.num_participants)
+
+        logging.info(f"Selected participants to run: {clients_to_run}")
+
+        # Issue requests to the resource manager; Tasks ordered by the completion time
+        self.resource_manager.register_tasks(clients_to_run)
+        self.tasks_round = len(clients_to_run)
+
+        # Update executors and participants
+        if self.experiment_mode == commons.SIMULATION_MODE:
+            self.sampled_executors = list(
+                self.individual_client_events.keys())
+        else:
+            self.sampled_executors = [str(c_id)
+                                      for c_id in self.sampled_participants]
+        self.round_stragglers = round_stragglers
+        self.virtual_client_clock = virtual_client_clock
+        self.stats_util_accumulator = []
+        self.update_default_task_config()
+
+        # TODO Ping or send response to client that invoked round_completion_handler
+
+    def select_participants(self, cur_time, select_num_participants, overcommitment=1.3):
+        """Select clients for next round.
+
+        Args:
+            select_num_participants (int): Number of clients to select.
+            overcommitment (float): Overcommit ratio for next round.
+
+        Returns:
+            list of int: The list of sampled clients id.
+
+        """
+        return sorted(self.client_manager.select_participants(
+            int(select_num_participants * overcommitment),
+            cur_time=cur_time),
+        )
+
+    def tictak_client_tasks(self, sampled_clients, num_clients_to_collect):
+        """Record sampled client execution information in last round. In the SIMULATION_MODE,
+        further filter the sampled_client and pick the top num_clients_to_collect clients.
+
+        Args:
+            sampled_clients (list of int): Sampled clients from client manager
+            num_clients_to_collect (int): The number of clients actually needed for next round.
+
+        Returns:
+            Tuple: (the List of clients to run, the List of stragglers in the round, a Dict of the virtual clock of each
+            client, the duration of the aggregation round, and the durations of each client's task).
+
+        """
+        if self.experiment_mode == commons.SIMULATION_MODE:
+            # NOTE: We try to remove dummy events as much as possible in simulations,
+            # by removing the stragglers/offline clients in overcommitment"""
+            sampledClientsReal = []
+            completionTimes = []
+            completed_client_clock = {}
+            # 1. remove dummy clients that are not available to the end of training
+            for client_to_run in sampled_clients:
+                client_cfg = self.client_conf.get(client_to_run, self.args)
+
+                exe_cost = self.client_manager.get_completion_time(client_to_run,
+                                                                   batch_size=client_cfg.batch_size,
+                                                                   local_steps=client_cfg.local_steps,
+                                                                   upload_size=self.model_update_size,
+                                                                   download_size=self.model_update_size)
+
+                roundDuration = exe_cost['computation'] + \
+                    exe_cost['communication']
+                # if the client is not active by the time of collection, we consider it is lost in this round
+                if self.client_manager.isClientActive(client_to_run, roundDuration + self.global_virtual_clock):
+                    sampledClientsReal.append(client_to_run)
+                    completionTimes.append(roundDuration)
+                    completed_client_clock[client_to_run] = exe_cost
+
+            num_clients_to_collect = min(
+                num_clients_to_collect, len(completionTimes))
+            # 2. get the top-k completions to remove stragglers
+            workers_sorted_by_completion_time = sorted(
+                range(len(completionTimes)), key=lambda k: completionTimes[k])
+            top_k_index = workers_sorted_by_completion_time[:num_clients_to_collect]
+            clients_to_run = [sampledClientsReal[k] for k in top_k_index]
+
+            stragglers = [sampledClientsReal[k]
+                          for k in workers_sorted_by_completion_time[num_clients_to_collect:]]
+            round_duration = completionTimes[top_k_index[-1]]
+            completionTimes.sort()
+
+            return (clients_to_run, stragglers,
+                    completed_client_clock, round_duration,
+                    completionTimes[:num_clients_to_collect])
+        else:
+            completed_client_clock = {
+                client: {'computation': 1, 'communication': 1} for client in sampled_clients}
+            completionTimes = [1 for c in sampled_clients]
+            return (sampled_clients, sampled_clients, completed_client_clock,
+                    1, completionTimes)
+
     def deserialize_response(self, responses):
         """Deserialize the response from executor
 
@@ -366,25 +490,24 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         """
         # NOTE: client_id = executor_id in deployment,
         # while multiple client_id may use the same executor_id (VMs) in simulations
-        executor_id, client_id = request.executor_id, request.client_id
+        executor_id, client_id, event = request.executor_id, request.client_id, request.event
         response_data = response_msg = commons.DUMMY_RESPONSE
         current_event = commons.DUMMY_EVENT
 
-        if self.individual_client_events[executor_id]:
-            current_event = self.individual_client_events[executor_id].popleft(
-            )
-            if current_event == commons.START_ROUND:
-                # TODO This should function as a start training event
-                response_msg, response_data = self.create_client_task(
-                    executor_id)
-            elif current_event == commons.MODEL_TEST:
-                response_msg = self.get_test_config(client_id)
-            elif current_event == commons.SHUT_DOWN:
-                response_msg = self.get_shutdown_config(executor_id)
+        if event == commons.GL_REQUEST_NEIGHBORS:
+            # TODO Integrate get valid neighbors
+            pass
+
+        # client_event_queue = self.individual_client_events[executor_id]
+        # if client_event_queue:
+        #     current_event = client_event_queue.popleft()
+        #     if current_event == commons.MODEL_TEST:
+        #         response_msg = self.get_test_config(client_id)
+        #     elif current_event == commons.SHUT_DOWN:
+        #         response_msg = self.get_shutdown_config(executor_id)
 
         response_msg, response_data = self.serialize_response(
             response_msg), self.serialize_response(response_data)
-        # NOTE: in simulation mode, response data is pickle for faster (de)serialization
         response = job_api_pb2.ServerResponse(event=current_event,
                                               meta=response_msg, data=response_data)
         if current_event != commons.DUMMY_EVENT:
