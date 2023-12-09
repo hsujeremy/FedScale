@@ -2,12 +2,10 @@ import collections
 import logging
 import os
 import pickle
-import random
 import time
 from concurrent import futures
 
 import grpc
-import numpy as np
 import torch
 import wandb
 
@@ -33,7 +31,6 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
 
         self.experiment_mode = args.experiment_mode
 
-        self.round_duration = 0.
         self.resource_manager = ResourceManager(commons.SIMULATION_MODE)
         self.client_manager = ClientManager(args.sample_mode, args=args)
 
@@ -135,7 +132,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         """
         logging.info(f"Initiating control plane communication ...")
 
-        # simulation mode
+        # TODO Check if we need the simulation mode that was in the original implmentation
         # num_of_executors = 0
         # for ip_numgpu in self.args.executor_configs.split("="):
         #     ip, numgpu = ip_numgpu.split(':')
@@ -173,26 +170,22 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
 
         """
         # TODO Figure out registering info with executors since now client = executor
-        logging.info(f"Loading {len(info['size'])} client traces ...")
-        for _size in info['size']:
+        systemProfile = {'computation': 1.0, 'communication': 1.0}
+        if self.client_profiles:
             # since the worker rankId starts from 1, we also configure the initial dataId as 1
-            mapped_id = (self.num_of_clients + 1) % len(
-                self.client_profiles) if len(self.client_profiles) > 0 else 1
-            systemProfile = self.client_profiles.get(
-                mapped_id, {'computation': 1.0, 'communication': 1.0})
+            mapped_id = (executor_id + 1) % len(self.client_profiles)
+            systemProfile = self.client_profiles.get(mapped_id, systemProfile)
 
-            client_id = (
-                self.num_of_clients + 1) if self.experiment_mode == commons.SIMULATION_MODE else executor_id
-            self.client_manager.register_client(
-                executor_id, client_id, size=_size, speed=systemProfile)
-            # self.client_manager.registerDuration(
-            #     client_id,
-            #     batch_size=self.args.batch_size,
-            #     local_steps=self.args.local_steps,
-            #     # upload_size=self.model_update_size,
-            #     # download_size=self.model_update_size
-            # )
-            self.num_of_clients += 1
+        client_id = executor_id
+        self.client_manager.register_client(
+            executor_id, client_id, size=info['size'][0], speed=systemProfile)
+        # self.client_manager.registerDuration(
+        #     client_id,
+        #     batch_size=self.args.batch_size,
+        #     local_steps=self.args.local_steps,
+        #     # upload_size=self.model_update_size,
+        #     # download_size=self.model_update_size
+        # )
 
         logging.info("Info of all feasible clients {}".format(
             self.client_manager.getDataInfo()))
@@ -230,7 +223,8 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
                     # execute every 100 ms
                     time.sleep(0.1)
         except KeyboardInterrupt:
-            logging.info("KeyboardInterrupt: stopping the coordinator and all executors ...")
+            logging.info(
+                "KeyboardInterrupt: stopping the coordinator and all executors ...")
             self.dispatch_client_events(commons.SHUT_DOWN)
 
     def dispatch_client_events(self, event, clients=None):
@@ -400,9 +394,6 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         return response
 
     def stop(self):
-        """
-            TODO: wandb logging
-        """
         logging.info(f"Terminating the aggregator ...")
         if self.wandb != None:
             self.wandb.finish()
