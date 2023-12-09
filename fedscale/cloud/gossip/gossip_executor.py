@@ -32,6 +32,7 @@ from fedscale.cloud.gossip.gossip_channel_context import GossipClientConnections
 from fedscale.cloud.internal.tensorflow_model_adapter import TensorflowModelAdapter
 from fedscale.cloud.internal.torch_model_adapter import TorchModelAdapter
 from fedscale.dataloaders.divide_data import DataPartitioner, select_dataset
+from torch.utils.tensorboard import SummaryWriter
 
 """
 Make a server for each client
@@ -102,7 +103,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.rng = Random()
         self.rng.seed(233)
 
-        # ======== Wandb ========
+        # ======== Logging ========
+        self.log_writer = SummaryWriter(log_dir=logger.logDir)
         if args.wandb_token:
             os.environ['WANDB_API_KEY'] = args.wandb_token
             self.wandb = wandb
@@ -296,6 +298,18 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         acc = round(test_res["top_1"] / test_res["test_len"], 4)
         acc_5 = round(test_res["top_5"] / test_res["test_len"], 4)
         test_loss = test_res["test_loss"] / test_res["test_len"]
+
+        print(f"Wall clock time: sec - {round(self.global_virtual_clock)}, min - {round(self.global_virtual_clock / 60.)}")
+
+        self.log_writer.add_scalar(
+            'Test/round_to_loss', test_loss, self.round)
+        self.log_writer.add_scalar(
+            'Test/round_to_accuracy', acc, self.round)
+        self.log_writer.add_scalar('Test/time_to_test_loss (min)', test_loss,
+                                   round(self.global_virtual_clock))
+        self.log_writer.add_scalar('Test/time_to_test_accuracy (min)', acc,
+                                   round(self.global_virtual_clock))
+        
         if self.wandb != None:
             # Reporting metrics relative to round
             self.wandb.log({
@@ -303,13 +317,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 'Test/round_to_top5_accuracy': acc_5,
                 'Test/round_to_loss': test_loss,
             }, step=testing_round)
-
-            # Reporting metrics relative to total time
-            self.wandb.log({
-                'Test/time_to_top1_accuracy': acc,
-                'Test/time_to_top5_accuracy': acc_5,
-                'Test/time_to_loss': test_loss,
-            }, step=int(self.global_virtual_clock/60))
 
     def train(self):
         train_config = {
