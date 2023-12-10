@@ -6,6 +6,7 @@ from fedscale.cloud.gossip.gossip_coordinator import GossipCoordinator
 from fedscale.cloud.gossip.gossip_executor import Executor
 
 import datetime
+import yaml
 
 def run_executor(port):
     parser.args.port = port
@@ -19,12 +20,36 @@ def run_coordinator(num_executors):
     c.run()
 
 
+def load_yaml_conf(yaml_file):
+    with open(yaml_file) as fin:
+        data = yaml.load(fin, Loader=yaml.FullLoader)
+    return data
+
+
 def main():
     parser.args.time_stamp = datetime.datetime.fromtimestamp(
         time.time()).strftime('%m%d_%H%M%S')
     local_parser = argparse.ArgumentParser()
-    local_parser.add_argument("--num_executors", type=int, default=50)
+    local_parser.add_argument("--num_executors", type=int, default=40)
+    local_parser.add_argument("--config", type=str)
+
     local_args = local_parser.parse_args()
+
+    if local_args.config is not None:
+        yaml_conf = load_yaml_conf(local_args.config)
+        conf = {}
+        job_conf = yaml_conf["job_conf"]
+
+        for jc in job_conf: 
+            conf = {**conf, **jc}
+        
+        parser.args.model = conf["model"]
+        parser.args.job_name = conf["job_name"]
+        parser.args.data_dir = conf["data_dir"]
+        parser.args.data_set = conf["data_set"]
+        parser.args.task = conf["task"]
+        parser.args.learning_rate = conf["learning_rate"]
+
     num_processes = local_args.num_executors + 1
     if num_processes < 2:
         print('Need at least 2 processes for at least one coordinator and executor')
