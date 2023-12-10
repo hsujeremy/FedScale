@@ -3,10 +3,10 @@ import argparse
 from fedscale.cloud import commons
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--job_name', type=str, default='demo_job')
+parser.add_argument('--job_name', type=str, default='gossip')
 parser.add_argument('--log_path', type=str, default='./',
                     help="default path is ../log")
-parser.add_argument('--wandb_token', type=str, default="",
+parser.add_argument('--wandb_token', type=str, default="df17256579878c06b3f7f023e669b1f30306395d",
                     help="API key for wandb as login credentials")
 
 # The basic configuration of the cluster
@@ -37,10 +37,10 @@ parser.add_argument('--clock_factor', type=float, default=1.0,
 parser.add_argument('--model_zoo', type=str, default='torchcv',
                     help="model zoo to load the models from", choices=["torchcv", "fedscale-torch-zoo",
                                                                        "fedscale-tensorflow-zoo"])
-parser.add_argument('--data_dir', type=str, default='~/cifar10/')
+parser.add_argument('--data_dir', type=str, default='/n/home10/steveli/FedScale/benchmark/dataset/data/femnist')
 parser.add_argument('--device_conf_file', type=str, default='/tmp/client.cfg')
-parser.add_argument('--model', type=str, default='shufflenet_v2_x2_0')
-parser.add_argument('--data_set', type=str, default='cifar10')
+parser.add_argument('--model', type=str, default='resnet18')
+parser.add_argument('--data_set', type=str, default='femnist')
 parser.add_argument('--sample_mode', type=str, default='random')
 parser.add_argument('--filter_less', "-fl", type=int, default=32)
 parser.add_argument('--filter_more', "-fm", type=int, default=1e15)
@@ -72,7 +72,7 @@ parser.add_argument('--output_dim', type=int, default=0)
 parser.add_argument('--dump_epoch', type=int, default=1e10)
 parser.add_argument('--decay_factor', type=float, default=0.98)
 parser.add_argument('--decay_round', type=float, default=10)
-parser.add_argument('--num_loaders', type=int, default=2)
+parser.add_argument('--num_loaders', type=int, default=1)
 parser.add_argument('--eval_interval', type=int, default=5)
 parser.add_argument('--sample_seed', type=int, default=233)  # 123 #233
 parser.add_argument('--test_ratio', type=float, default=1.0)

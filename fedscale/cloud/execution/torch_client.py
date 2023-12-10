@@ -13,6 +13,8 @@ from fedscale.cloud.internal.torch_model_adapter import TorchModelAdapter
 from fedscale.dataloaders.nlp import mask_tokens
 from fedscale.utils.model_test_module import test_pytorch_model
 
+from tqdm import tqdm
+
 
 class TorchClient(ClientBase):
     """Implements a PyTorch-based client for training and evaluation."""
@@ -141,7 +143,7 @@ class TorchClient(ClientBase):
 
     def train_step(self, client_data, conf, model, optimizer, criterion):
 
-        for data_pair in client_data:
+        for data_pair in tqdm(client_data):
             if conf.task == 'nlp':
                 (data, _) = data_pair
                 data, target = mask_tokens(
@@ -257,7 +259,7 @@ class TorchClient(ClientBase):
         if self.args.task == 'voice':
             criterion = CTCLoss(reduction='mean').to(device=self.device)
         else:
-            criterion = torch.nn.CrossEntropyLoss().to(device=self.device)
+            criterion = torch.nn.CrossEntropyLoss().to(device=self.device)        
         test_loss, acc, acc_5, test_results = test_pytorch_model(conf.rank, model, client_data,
                                                                  device=self.device, criterion=criterion,
                                                                  tokenizer=conf.tokenizer)

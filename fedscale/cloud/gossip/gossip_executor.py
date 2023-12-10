@@ -38,7 +38,7 @@ from torch.utils.tensorboard import SummaryWriter
 Make a server for each client
 """
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
-AGGREGATION_FREQUENCY = 5  # Number of iterations between aggregation
+AGGREGATION_FREQUENCY = 10  # Number of iterations between aggregation
 
 DEFAULT_NUM_ITERATIONS = 200
 
@@ -94,6 +94,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         self.client_manager = self.init_client_manager(args=args)
 
+        self.dead_neighbors = set()
+
         # ======== channels ========
         self.client_communicator = GossipClientConnections(
             args.ps_ip, client_id)
@@ -112,9 +114,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             os.environ['WANDB_API_KEY'] = args.wandb_token
             self.wandb = wandb
             if not self.wandb.run:
-                self.wandb.init(project=f'fedscale-{args.job_name}',
+                self.wandb.init(project=f'gossip-{args.job_name}',
                                 name=f'executor{args.this_rank}-{args.time_stamp}-{self.client_id}',
-                                group=f'{args.time_stamp}')
+                                group=f'{args.time_stamp}',
+                                entity="steveli")
             else:
                 logging.error("Warning: wandb has already been initialized")
 
@@ -232,7 +235,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         Returns:
             list: The list of neighbors to request weights from.
         """
-        logging.info("Selecting neighbors to send weights too...")
         total_executors = list(range(self.num_executors))
         candidates = [i for i in total_executors if i != self.client_id]
         self.rng.shuffle(candidates)
@@ -363,8 +365,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 neighbors = self.select_neighbors(
                     min_replies=self.neighbor_threshold)
                 
-                dead_neighbors = 0
-
                 for neighbor in neighbors:
                     retries = 0
                     stub = self.client_communicator.stubs[neighbor]
@@ -388,12 +388,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                             time.sleep(0.1)
                             retries += 1
                     
+                    
                     if not succeeded:
-                        dead_neighbors += 1
+                        self.dead_neighbors.add(neighbor)
 
                 # Wait for neighbors to send back weights
                 # TODO replace temp placeholder with min_num_neighbors = int(self.model_updates_threshold * self.num_neighbors)
-                self.min_num_neighbors = int(self.model_updates_threshold * len(neighbors)) - dead_neighbors
+                self.min_num_neighbors = int(self.model_updates_threshold * len(neighbors)) - len(self.dead_neighbors)
                 self.model_weights = self.model_wrapper.get_weights()
                 logging.info(
                     f"Client {self.client_id} waiting to receive weights from {self.min_num_neighbors} neighbors")
@@ -500,7 +501,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         """
         logging.info(f"Sending weights to client {client_id}")
         weights = self.serialize_response(weights)
-        logging.info("Serialized weights...")
         count = 0
         while count < self.max_retries:
             try:
@@ -509,10 +509,12 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                                     curr_round=curr_round,
                                                     weights=weights
                                                     ))
-                return future_call
+                break
             except:
-                time.sleep(2)
+                logging.info(f"Failed to send to {client_id}, retrying")
+                time.sleep(0.2)
                 count += 1
+        logging.info(f"Sent weights to client {client_id}")
         return 
         # Send model to client
 
@@ -795,7 +797,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 )
                 return response 
             except:
-                time.sleep(2)
+                time.sleep(0.2)
                 count += 1
         
         response = job_api_pb2.ServerResponse(event="Failed to connect to aggregator.",

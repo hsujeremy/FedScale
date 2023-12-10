@@ -59,7 +59,8 @@ class Executor(object):
             os.environ['WANDB_API_KEY'] = args.wandb_token
             self.wandb = wandb
             if self.wandb.run is None:
-                self.wandb.init(project=f'fedscale-{args.job_name}',
+                self.wandb.init(project=f'fedscale',
+                                entity="steveli",
                                 name=f'executor{args.this_rank}-{args.time_stamp}',
                                 group=f'{args.time_stamp}')
             else:
@@ -112,6 +113,7 @@ class Executor(object):
             Tuple of DataPartitioner class: The partioned dataset class for training and testing
 
         """
+        print("loading dataset")
         train_dataset, test_dataset = init_dataset()
         if self.args.task == "rl":
             return train_dataset, test_dataset

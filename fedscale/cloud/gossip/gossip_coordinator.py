@@ -58,6 +58,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
         self.finished_clients = set()
         self.num_of_clients = 0
         self.model_update_size = 0
+        self.dead_neighbors = 0
 
         # ======== Wandb ========
         if args.wandb_token != "":
@@ -66,7 +67,8 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
             if self.wandb.run is None:
                 self.wandb.init(project=f'fedscale-{args.job_name}',
                                 name=f'aggregator{args.this_rank}-{args.time_stamp}',
-                                group=f'{args.time_stamp}')
+                                group=f'{args.time_stamp}',
+                                entity="steveli")
                 self.wandb.config.update({
                     "num_participants": args.num_participants,
                     "data_set": args.data_set,

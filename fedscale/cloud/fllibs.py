@@ -275,7 +275,7 @@ def init_dataset():
 
         elif parser.args.data_set == 'femnist':
             from fedscale.dataloaders.femnist import FEMNIST
-
+            print("GETTING FEMNIST")
             train_transform, test_transform = get_data_transform('mnist')
             train_dataset = FEMNIST(
                 parser.args.data_dir, dataset='train', transform=train_transform)

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
+from tqdm import tqdm 
 
 # libs from fedscale
 import fedscale.cloud.config_parser as parser
@@ -89,7 +90,7 @@ def test_pytorch_model(rank, model, test_data, device='cpu', criterion=nn.NLLLos
             max_per_image = 100
             thresh = 0.0
             empty_array = np.transpose(np.array([[], [], [], [], []]), (1, 0))
-            for i in range(num_images):
+            for i in tqdm(range(num_images)):
                 data = next(data_iter)
                 im_data = Variable(torch.FloatTensor(1).to(device))
                 im_info = Variable(torch.FloatTensor(1).to(device))
@@ -164,7 +165,7 @@ def test_pytorch_model(rank, model, test_data, device='cpu', criterion=nn.NLLLos
                     all_boxes, output_dir, parser.args.this_rank)
                 return 0, mean_ap, mean_ap, {'top_1': mean_ap, 'top_5': mean_ap, 'test_loss': 0, 'test_len': num_images}
 
-        for data, target in test_data:
+        for data, target in tqdm(test_data):
             try:
                 if parser.args.task == 'nlp':
 
