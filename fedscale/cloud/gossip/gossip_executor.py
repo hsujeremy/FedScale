@@ -359,9 +359,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         weights = None
         for i in range(self.num_iterations):
             round_start_time = time.time()
-            if self.received_stop_request:
-                break
-
             if i > 0 and i % AGGREGATION_FREQUENCY == 0:
                 neighbors = self.select_neighbors(
                     min_replies=self.neighbor_threshold)
@@ -423,6 +420,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                           AGGREGATION_FREQUENCY-1, config=None)
                 # Reset round start time after testing is complete
                 round_start_time = time.time()
+
+            if self.received_stop_request:
+                break
 
             logging.info(
                 f"Training iteration {i + 1} of {self.num_iterations}")

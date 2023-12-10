@@ -229,7 +229,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
                     self.dispatch_client_events(current_event)
                     
                     if len(self.finished_clients) == len(self.executors):
-                        self.stop()
+                        break
                 else:
                     # execute every 100 ms
                     time.sleep(0.1)
