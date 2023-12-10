@@ -302,15 +302,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         acc_5 = round(test_res["top_5"] / test_res["test_len"], 4)
         test_loss = test_res["test_loss"] / test_res["test_len"]
 
-        print(f"Wall clock time: sec - {round(self.global_virtual_clock)}, min - {round(self.global_virtual_clock / 60.)}")
-
         self.log_writer.add_scalar(
-            'Test/round_to_loss', test_loss, self.round)
+            'Test/round_to_loss', test_loss, testing_round)
         self.log_writer.add_scalar(
-            'Test/round_to_accuracy', acc, self.round)
-        self.log_writer.add_scalar('Test/time_to_test_loss (min)', test_loss,
+            'Test/round_to_accuracy', acc, testing_round)
+        self.log_writer.add_scalar('Test/time_to_test_loss (sec)', test_loss,
                                    round(self.global_virtual_clock))
-        self.log_writer.add_scalar('Test/time_to_test_accuracy (min)', acc,
+        self.log_writer.add_scalar('Test/time_to_test_accuracy (sec)', acc,
                                    round(self.global_virtual_clock))
         
         if self.wandb != None:
@@ -806,6 +804,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     def stop(self):
         self.grpc_server.stop(None)
+        self.log_writer.flush()
         if self.wandb != None:
             self.wandb.finish()
         logging.info(f"Terminating client {self.client_id}")
