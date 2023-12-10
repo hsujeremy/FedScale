@@ -8,6 +8,7 @@ DEPLOYMENT_MODE = 'deployment'
 UPDATE_MODEL = 'update_model'
 MODEL_TEST = 'model_test'
 SHUT_DOWN = 'terminate_executor'
+END_ROUND = 'end_round'
 START_ROUND = 'start_round'
 CLIENT_CONNECT = 'client_connect'
 CLIENT_TRAIN = 'client_train'
@@ -19,6 +20,7 @@ GL_ACK = 'ack'
 
 # Client A sends GL_REQUEST_WEIGHTS to client B to get weights back
 GL_REQUEST_WEIGHTS = "request_weights"
+CLIENT_FINISH = "client_finish"
 
 # PLACEHOLD
 DUMMY_RESPONSE = 'N'
