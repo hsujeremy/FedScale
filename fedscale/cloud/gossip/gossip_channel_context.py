@@ -1,7 +1,8 @@
 import logging
 
 import grpc
-
+import time
+import json
 import fedscale.cloud.gossip.job_api_pb2_grpc as job_api_pb2_grpc
 
 MAX_MESSAGE_LENGTH = 1*1024*1024*1024  # 1GB
@@ -47,6 +48,25 @@ class GossipClientConnections(object):
         # TODO: what if the clients have different host names? Need to store those too
 
         # Connect to other clients
+        service_config_json = json.dumps(
+            {
+                "methodConfig": [
+                    {
+                        # To apply retry to all methods, put [{}] in the "name" field
+                        "name": [
+                            {}
+                        ],
+                        "retryPolicy": {
+                            "maxAttempts": 5,
+                            "initialBackoff": "0.1s",
+                            "maxBackoff": "1s",
+                            "backoffMultiplier": 2,
+                            "retryableStatusCodes": ["UNAVAILABLE"],
+                        },
+                    }
+                ]
+            }
+        )
         for port in range(num_executors):
             # Use placeholder for self
             if port == self.client_id:
@@ -60,8 +80,12 @@ class GossipClientConnections(object):
                 options=[
                     ('grpc.max_send_message_length', MAX_MESSAGE_LENGTH),
                     ('grpc.max_receive_message_length', MAX_MESSAGE_LENGTH),
+                    ('grpc.enable_retries', 1),
+                    ('grpc.service_config', service_config_json)
                 ]
             )
+
+            time.sleep(0.1)
 
             self.channels.append(channel)
             self.stubs.append(job_api_pb2_grpc.JobServiceStub(channel))

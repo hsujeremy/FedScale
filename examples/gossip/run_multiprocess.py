@@ -5,6 +5,7 @@ import fedscale.cloud.config_parser as parser
 from fedscale.cloud.gossip.gossip_coordinator import GossipCoordinator
 from fedscale.cloud.gossip.gossip_executor import Executor
 
+import datetime
 
 def run_executor(port):
     parser.args.port = port
@@ -19,8 +20,10 @@ def run_coordinator(num_executors):
 
 
 def main():
+    parser.args.time_stamp = datetime.datetime.fromtimestamp(
+        time.time()).strftime('%m%d_%H%M%S')
     local_parser = argparse.ArgumentParser()
-    local_parser.add_argument("--num_executors", type=int, default=3)
+    local_parser.add_argument("--num_executors", type=int, default=50)
     local_args = local_parser.parse_args()
     num_processes = local_args.num_executors + 1
     if num_processes < 2:

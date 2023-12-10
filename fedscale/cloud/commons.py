@@ -13,6 +13,9 @@ CLIENT_CONNECT = 'client_connect'
 CLIENT_TRAIN = 'client_train'
 DUMMY_EVENT = 'dummy_event'
 UPLOAD_MODEL = 'upload_model'
+CLIENT_FINISH = 'client_finish'
+END_ROUND = "end_round"
+CLIENT_DEAD = "client_dead"
 
 # Define Basic GL Events
 GL_ACK = 'ack'

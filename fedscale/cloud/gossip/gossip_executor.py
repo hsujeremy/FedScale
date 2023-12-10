@@ -38,9 +38,9 @@ from torch.utils.tensorboard import SummaryWriter
 Make a server for each client
 """
 MAX_MESSAGE_LENGTH = 1 * 1024 * 1024 * 1024  # 1GB
-AGGREGATION_FREQUENCY = 3  # Number of iterations between aggregation
+AGGREGATION_FREQUENCY = 5  # Number of iterations between aggregation
 
-DEFAULT_NUM_ITERATIONS = 15
+DEFAULT_NUM_ITERATIONS = 200
 
 
 class Executor(job_api_pb2_grpc.JobServiceServicer):
@@ -113,7 +113,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             self.wandb = wandb
             if not self.wandb.run:
                 self.wandb.init(project=f'fedscale-{args.job_name}',
-                                name=f'executor{args.this_rank}-{args.time_stamp}',
+                                name=f'executor{args.this_rank}-{args.time_stamp}-{self.client_id}',
                                 group=f'{args.time_stamp}')
             else:
                 logging.error("Warning: wandb has already been initialized")
@@ -286,7 +286,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                      batch_size=self.args.test_bsz, args=self.args,
                                      isTest=True, collate_fn=self.collate_fn)
 
-        logging.info(f"Testing dataloader length: {data_loader}")
         test_results = client.test(data_loader, model, test_config)
         self.log_test_result(test_results, testing_round)
         gc.collect()
@@ -353,7 +352,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                            collate_fn=self.collate_fn
                            )
 
-        logging.info(f"Training dataloader length: {len(client_data)}")
         train_res = TorchClient(self.args).train(
             client_data=client_data, model=self.model_adapter.get_model(), conf=conf)
 
@@ -367,14 +365,15 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 break
 
             if i > 0 and i % AGGREGATION_FREQUENCY == 0:
-                logging.info("Selecting neighbors to send weights too...")
                 neighbors = self.select_neighbors(
                     min_replies=self.neighbor_threshold)
+                
+                dead_neighbors = 0
 
                 for neighbor in neighbors:
                     retries = 0
                     stub = self.client_communicator.stubs[neighbor]
-
+                    succeeded = False
                     # retry max_retries times
                     while retries < self.max_retries:
                         try:
@@ -386,16 +385,20 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                     curr_round=i,
                                 )
                             )
+                            succeeded = True
                             break
                         except Exception as e:
                             logging.info(
                                 f"Failed to send request weights ping to {neighbor} with exception {e}, retrying...")
                             time.sleep(0.1)
                             retries += 1
+                    
+                    if not succeeded:
+                        dead_neighbors += 1
 
                 # Wait for neighbors to send back weights
                 # TODO replace temp placeholder with min_num_neighbors = int(self.model_updates_threshold * self.num_neighbors)
-                self.min_num_neighbors = len(neighbors)
+                self.min_num_neighbors = int(self.model_updates_threshold * len(neighbors)) - dead_neighbors
                 self.model_weights = self.model_wrapper.get_weights()
                 logging.info(
                     f"Client {self.client_id} waiting to receive weights from {self.min_num_neighbors} neighbors")
@@ -408,10 +411,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                             continue
                         received_weights = self.deserialize_response(
                             received_weights)
-                        logging.info(f"Aggregating weights from client {client_id}")
                         self.aggregate_weights_handler(received_weights)
 
-                    logging.info("Unloading send queue")
                     self.unload_send_queue(weights)
 
                     time.sleep(0.1)
@@ -420,7 +421,6 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
                 # Run test/evaluation on the model after trainig round
                 self.global_virtual_clock += time.time() - round_start_time
-                logging.info(f"Testing client {self.client_id}")
                 self.test(testing_round=i //
                           AGGREGATION_FREQUENCY-1, config=None)
                 # Reset round start time after testing is complete
@@ -458,13 +458,11 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             time.sleep(2)
 
         self.client_communicator.connect_to_executors(self.num_executors)
-        logging.info("Starting loop...")
-
+        time.sleep(60)
         self.train_and_monitor()
 
         logging.info("Sending client finish to coordinator...")
         self.coordinator_ping(event=commons.CLIENT_FINISH)
-        logging.info("Listening and sending...")
         self.listen_and_send()
 
         logging.info("Stopping...")
@@ -503,16 +501,25 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
         """
         logging.info(f"Sending weights to client {client_id}")
-
-        # Send model to client
         weights = self.serialize_response(weights)
+        logging.info("Serialized weights...")
+        count = 0
+        while count < self.max_retries:
+            try:
+                future_call = self.client_communicator.stubs[client_id].UPLOAD_WEIGHTS(
+                    job_api_pb2.UploadWeightRequest(client_id=str(self.client_id),
+                                                    curr_round=curr_round,
+                                                    weights=weights
+                                                    ))
+                return future_call
+            except:
+                time.sleep(2)
+                count += 1
+        return 
+        # Send model to client
 
         # TODO figure out if we should implement using futures
-        future_call = self.client_communicator.stubs[client_id].UPLOAD_WEIGHTS(
-            job_api_pb2.UploadWeightRequest(client_id=str(self.client_id),
-                                            curr_round=curr_round,
-                                            weights=weights
-                                            ))
+
         # future_call.add_done_callback(
         #     lambda _response: self.dispatch_worker_events(_response.result()))
 
@@ -650,7 +657,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             info (dictionary): Executor information
 
         """
-        logging.info(f"Loading {len(info['size'])} client traces ...")
+        # logging.info(f"Loading {len(info['size'])} client traces ...")
         for _size in info['size']:
             # since the worker rankId starts from 1, we also configure the initial dataId as 1
             mapped_id = 1
@@ -674,8 +681,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             )
             self.num_of_clients += 1
 
-        logging.info("Info of all feasible clients {}".format(
-            self.client_manager.getDataInfo()))
+        # logging.info("Info of all feasible clients {}".format(
+        #     self.client_manager.getDataInfo()))
 
     def client_register(self):
         """Register the client information to neighbors
@@ -737,7 +744,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             ServerResponse: Server response to job completion request
 
         """
-        logging.info("Received weights from neighbor")
+        # logging.info("Received weights from neighbor")
         self.dispatch_receive_events(request)
 
         event = commons.GL_ACK
@@ -776,35 +783,26 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                               meta=response_msg, data=response_data)
         return response
 
-    def client_ping(self, stub):
-        """Ping the aggregator for new task
-        """
-        try:
-            response = stub.CLIENT_PING(job_api_pb2.PingRequest(
-                client_id=str(self.client_id),
-                executor_id=str(self.executor_id)
-            ))
-
-            return response
-        except:
-            response = job_api_pb2.ServerResponse(event="Failed to connect to aggregator.",
-                                                  meta=self.serialize_response("test"), data=self.serialize_response("test"))
-            return response
         # self.dispatch_worker_events(response)
-
     def coordinator_ping(self, event):
-        try:
-            response = self.client_communicator.aggregator_stub.CLIENT_PING(job_api_pb2.PingRequest(
-                    client_id=str(self.client_id),
-                    executor_id=str(self.executor_id),
-                    event=str(event),
-                    num_executors=str(self.num_executors)
+        count = 0 
+        while count < self.max_retries:
+            try:
+                response = self.client_communicator.aggregator_stub.CLIENT_PING(job_api_pb2.PingRequest(
+                        client_id=str(self.client_id),
+                        executor_id=str(self.executor_id),
+                        event=str(event),
+                        num_executors=str(self.num_executors)
+                    )
                 )
-            )
-        except:
-            response = job_api_pb2.ServerResponse(event="Failed to connect to aggregator.",
-                                                  meta=self.serialize_response("test"), data=self.serialize_response("test"))
-            return response
+                return response 
+            except:
+                time.sleep(2)
+                count += 1
+        
+        response = job_api_pb2.ServerResponse(event="Failed to connect to aggregator.",
+                                            meta=self.serialize_response("test"), data=self.serialize_response("test"))
+        return response
 
     def stop(self):
         self.grpc_server.stop(None)
