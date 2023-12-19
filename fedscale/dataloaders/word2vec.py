@@ -23,7 +23,9 @@ class AmazonReview_word2vec(Dataset):
 
         file = 'train.csv' if train else 'test.csv'
         map_file = os.path.join(data_path, 'client_data_mapping', file)
+        print("loading csv file...")
         self.df = pd.read_csv(map_file, delimiter=',')
+        print("resetting index...")
         # A reset reindexes from 1 to len(df), the shuffled df frames are sparse.
         self.df.reset_index(drop=True, inplace=True)
 
@@ -33,8 +35,9 @@ class AmazonReview_word2vec(Dataset):
         self.targets = []
         self.embeddings_index = {}
         self.embedding_file = embedding_path
-
+        print("loading embedding file")
         self.embedding(self.embedding_file)
+        print("downloading nltk stuff")
         nltk.download('stopwords')
         nltk.download('punkt')
         self.stop_words = stopwords.words('english')

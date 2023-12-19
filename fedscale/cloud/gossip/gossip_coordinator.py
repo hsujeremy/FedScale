@@ -65,7 +65,7 @@ class GossipCoordinator(job_api_pb2_grpc.JobServiceServicer):
             os.environ['WANDB_API_KEY'] = args.wandb_token
             self.wandb = wandb
             if self.wandb.run is None:
-                self.wandb.init(project=f'fedscale-{args.job_name}',
+                self.wandb.init(project=f'gossip-{args.job_name}',
                                 name=f'aggregator{args.this_rank}-{args.time_stamp}',
                                 group=f'{args.time_stamp}',
                                 entity="steveli")

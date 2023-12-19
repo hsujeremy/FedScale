@@ -2,7 +2,9 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from fedscale.cloud.fllibs import *
+from transformers import AlbertTokenizer
 
+tokenizer = AlbertTokenizer.from_pretrained("albert-base-v2", do_lower_case=True)
 
 def collate(examples):
     if tokenizer._pad_token is None:

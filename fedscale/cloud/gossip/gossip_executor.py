@@ -18,6 +18,8 @@ from argparse import Namespace
 
 import numpy as np
 
+from transformers import AlbertTokenizer
+
 import fedscale.cloud.gossip.job_api_pb2 as job_api_pb2
 import fedscale.cloud.gossip.job_api_pb2_grpc as job_api_pb2_grpc
 import fedscale.cloud.logger.executor_logging as logger
@@ -42,6 +44,7 @@ AGGREGATION_FREQUENCY = 10  # Number of iterations between aggregation
 
 DEFAULT_NUM_ITERATIONS = 200
 
+tokenizer = AlbertTokenizer.from_pretrained("albert-base-v2", do_lower_case=True)
 
 class Executor(job_api_pb2_grpc.JobServiceServicer):
     # TODO: for debugging purposes, maybe lower the number of rounds so things finish quicker
@@ -79,7 +82,13 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.receive_events_queue = collections.deque()
         self.send_events_queue = collections.deque()
         self.coordinator_events_queue = collections.deque()
-        self.waiting_for_start = True
+
+
+        self.receive_lock = threading.Lock()
+        self.send_lock = threading.Lock()
+        self.coordinator_lock = threading.Lock()
+
+        self.waiting_for_start = False
         self.waiting_for_end = True
         # ======== Model and Data ========
         self.training_sets = self.test_dataset = None
@@ -152,6 +161,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
 
     def init_model(self):
         """Initialize the model"""
+        logging.info("loading model and model wrapper ")
         if self.args.engine == commons.TENSORFLOW:
             self.model_wrapper = TensorflowModelAdapter(init_model())
         elif self.args.engine == commons.PYTORCH:
@@ -194,6 +204,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             Tuple of DataPartitioner class: The partioned dataset class for training and testing
 
         """
+        logging.info("Initializing data...")
         train_dataset, test_dataset = init_dataset()
         if self.args.task == "rl":
             return train_dataset, test_dataset
@@ -372,8 +383,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                     # retry max_retries times
                     while retries < self.max_retries:
                         try:
-                            logging.info(
-                                f"Requesting weights from client {neighbor}...")
+                            # logging.info(
+                            #     f"Requesting weights from client {neighbor}...")
                             stub.REQUEST_WEIGHTS(
                                 job_api_pb2.WeightRequest(
                                     client_id=str(self.client_id),
@@ -396,14 +407,16 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                 # TODO replace temp placeholder with min_num_neighbors = int(self.model_updates_threshold * self.num_neighbors)
                 self.min_num_neighbors = int(self.model_updates_threshold * len(neighbors)) - len(self.dead_neighbors)
                 self.model_weights = self.model_wrapper.get_weights()
-                logging.info(
-                    f"Client {self.client_id} waiting to receive weights from {self.min_num_neighbors} neighbors")
+                # logging.info(
+                #     f"Client {self.client_id} waiting to receive weights from {self.min_num_neighbors} neighbors")
                 while self.model_in_update < self.min_num_neighbors:
                     if self.receive_events_queue:
+                        self.receive_lock.acquire()
                         client_id, incoming_round, received_weights = self.receive_events_queue.popleft()
+                        self.receive_lock.release()
                         if incoming_round != i:
-                            logging.info(
-                                f"Received weights from client {client_id} for round {incoming_round}, but we're on round {i}. Skipping...")
+                            # logging.info(
+                            #     f"Received weights from client {client_id} for round {incoming_round}, but we're on round {i}. Skipping...")
                             continue
                         received_weights = self.deserialize_response(
                             received_weights)
@@ -447,7 +460,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         self.init_control_communication()
         self.init_model()
         self.training_sets, self.testing_sets = self.init_data()
-        time.sleep(10)
+        time.sleep(30)
 
         logging.info('Registering client with coordinator')
         self.client_register()
@@ -457,7 +470,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             time.sleep(2)
 
         self.client_communicator.connect_to_executors(self.num_executors)
-        time.sleep(60)
+        time.sleep(30)
         self.train_and_monitor()
 
         logging.info("Sending client finish to coordinator...")
@@ -499,7 +512,7 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             train_res (dictionary): The results from training.
 
         """
-        logging.info(f"Sending weights to client {client_id}")
+        # logging.info(f"Sending weights to client {client_id}")
         weights = self.serialize_response(weights)
         count = 0
         while count < self.max_retries:
@@ -511,10 +524,10 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
                                                     ))
                 break
             except:
-                logging.info(f"Failed to send to {client_id}, retrying")
+                # logging.info(f"Failed to send to {client_id}, retrying")
                 time.sleep(0.2)
                 count += 1
-        logging.info(f"Sent weights to client {client_id}")
+        # logging.info(f"Sent weights to client {client_id}")
         return 
         # Send model to client
 
@@ -530,8 +543,12 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             request (string): Add grpc request from server (e.g. MODEL_TEST, MODEL_TRAIN) to events_queue.
 
         """
+
+        self.receive_lock.acquire()
         self.receive_events_queue.append(
             (request.client_id, request.curr_round, request.weights))
+        self.receive_lock.release()
+
 
     def dispatch_send_events(self, request):
         """Add new events to worker queue for receiving weights.
@@ -539,7 +556,9 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         Args:
             request (string): Add grpc request from server (e.g. MODEL_TEST, MODEL_TRAIN) to events_queue.
         """
+        self.send_lock.acquire()
         self.send_events_queue.append((request.client_id, request.curr_round))
+        self.send_lock.release()
 
     def dispatch_coordinator_events(self, event):
         self.coordinator_events_queue.append(event)
@@ -548,6 +567,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
         pass
 
     def unload_send_queue(self, weights):
+
+        self.send_lock.acquire()
         # check queue
         # if we have any requests to send out weights
         while self.send_events_queue:
@@ -556,6 +577,8 @@ class Executor(job_api_pb2_grpc.JobServiceServicer):
             if weights:
                 self.client_send_weights_handler(
                     int(client_id), curr_round, weights)
+        
+        self.send_lock.release()
 
     def init_client_manager(self, args):
         """ Initialize client sampler

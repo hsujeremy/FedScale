@@ -8,9 +8,9 @@ ps_ip: localhost
 # Note that if we collocate ps and worker on same GPU, then we need to decrease this number of available processes on that GPU by 1
 # E.g., master node has 4 available processes, then 1 for the ps, and worker should be set to: worker:3
 worker_ips:
-    - localhost:[1] # worker_ip: [(# processes on gpu) for gpu in available_gpus] eg. 10.0.0.2:[4,4,4,4] This node has 4 gpus, each gpu has 4 processes.
+    - localhost:[4] # worker_ip: [(# processes on gpu) for gpu in available_gpus] eg. 10.0.0.2:[4,4,4,4] This node has 4 gpus, each gpu has 4 processes.
 
-exp_path: $FEDSCALE_HOME/fedscale/cloud
+exp_path: /n/home10/steveli/FedScale/fedscale/cloud
 
 # Entry function of executor and aggregator under $exp_path
 executor_entry: execution/executor.py
@@ -29,14 +29,16 @@ setup_commands:
 # Default parameters are specified in config_parser.py, wherein more description of the parameter can be found
 
 job_conf:
-    - job_name: tf-cifar10               # Generate logs under this folder: log_path/job_name/time_stamp
-    - log_path: $FEDSCALE_HOME/benchmark # Path of log files
-    - num_participants: 4                # Number of participants per round, we use K=100 in our paper, large K will be much slower
+    - job_name: cifar10_fedscale              # Generate logs under this folder: log_path/job_name/time_stamp
+    - log_path: /n/home10/steveli/FedScale/benchmark # Path of log files
+    - num_participants: 40                # Number of participants per round, we use K=100 in our paper, large K will be much slower
     - data_set: cifar10                  # Dataset: openImg, google_speech, stackoverflow
-    - data_dir: $FEDSCALE_HOME/benchmark/dataset/data/    # Path of the dataset
+    - data_dir: /n/home10/steveli/FedScale/benchmark/dataset/data/    # Path of the dataset
     - model: resnet50                    # Need to define the model in tf_aggregator.py
-    - model_zoo: fedscale-tensorflow-zoo
-    - eval_interval: 5000                # How many rounds to run a testing on the testing set
+    - device_conf_file: /n/home10/steveli/FedScale/benchmark/dataset/data/device_info/client_device_capacity     # Path of the client trace
+    - device_avail_file: /n/home10/steveli/FedScale/benchmark/dataset/data/device_info/client_behave_trace
+    # - model_zoo: fedscale-torch-zoo
+    - eval_interval: 10                # How many rounds to run a testing on the testing set
     - rounds: 200                        # Number of rounds to run this training. We use 1000 in our paper, while it may converge w/ ~400 rounds
     - filter_less: 0                     # Remove clients w/ less than 21 samples
     - num_loaders: 2
@@ -46,5 +48,5 @@ job_conf:
     - batch_size: 32
     - num_classes: 10
     - test_bsz: 32
-    - use_cuda: False
-    - engine: 'tensorflow'
+    - use_cuda: True
+    - engine: 'pytorch'

@@ -14,7 +14,9 @@ from fedscale.dataloaders.nlp import mask_tokens
 from fedscale.utils.model_test_module import test_pytorch_model
 
 from tqdm import tqdm
+from transformers import AlbertTokenizer
 
+tokenizer = AlbertTokenizer.from_pretrained("albert-base-v2", do_lower_case=True)
 
 class TorchClient(ClientBase):
     """Implements a PyTorch-based client for training and evaluation."""
@@ -52,6 +54,8 @@ class TorchClient(ClientBase):
         tokenizer = conf.tokenizer
 
         model = model.to(device=self.device)
+        # model = torch.nn.DataParallel(model, device_ids=[0, 1, 2, 3])
+
         model.train()
 
         trained_unique_samples = min(
@@ -69,6 +73,8 @@ class TorchClient(ClientBase):
         # NOTE: If one may hope to run fixed number of epochs, instead of iterations,
         # use `while self.completed_steps < conf.local_steps * len(client_data)` instead
         while self.completed_steps < conf.local_steps:
+            # self.train_step(client_data, conf, model, optimizer, criterion)
+
             try:
                 self.train_step(client_data, conf, model, optimizer, criterion)
             except Exception as ex:
@@ -142,8 +148,7 @@ class TorchClient(ClientBase):
         return criterion
 
     def train_step(self, client_data, conf, model, optimizer, criterion):
-
-        for data_pair in tqdm(client_data):
+        for data_pair in client_data:
             if conf.task == 'nlp':
                 (data, _) = data_pair
                 data, target = mask_tokens(
@@ -212,7 +217,8 @@ class TorchClient(ClientBase):
             # ======== collect training feedback for other decision components [e.g., oort selector] ======
 
             if conf.task == 'nlp' or (conf.task == 'text_clf' and conf.model == 'albert-base-v2'):
-                loss_list = [loss.item()]  # [loss.mean().data.item()]
+                loss_list = [loss.mean().data.item()]
+                loss = loss.mean()
 
             elif conf.task == "detection":
                 loss_list = [loss.tolist()]

@@ -26,7 +26,7 @@ parser.add_argument('--executor_configs', type=str,
 parser.add_argument('--num_participants', type=int, default=4)
 parser.add_argument('--data_map_file', type=str, default=None)
 parser.add_argument('--use_cuda', type=str, default='True')
-parser.add_argument('--cuda_device', type=str, default=None)
+parser.add_argument('--cuda_device', type=str, default="cuda")
 parser.add_argument('--time_stamp', type=str, default='logs')
 parser.add_argument('--task', type=str, default='cv')
 parser.add_argument('--device_avail_file', type=str, default=None)
@@ -55,7 +55,7 @@ parser.add_argument('--blacklist_rounds', type=int, default=-1)
 parser.add_argument('--blacklist_max_len', type=float, default=0.3)
 parser.add_argument('--embedding_file', type=str,
                     default='glove.840B.300d.txt')
-parser.add_argument('--input_shape', type=int, nargs='+', default=[1, 3, 28, 28])
+parser.add_argument('--input_shape', type=int, nargs='+', default=[32, 32, 3])
 parser.add_argument('--save_checkpoint', type=bool, default=False)
 
 

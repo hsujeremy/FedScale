@@ -101,10 +101,9 @@ def init_model():
     if parser.args.task == 'nlp':
         config = AutoConfig.from_pretrained(
             os.path.join(parser.args.data_dir, parser.args.model + '-config.json'))
-        model = AutoModelWithLMHead.from_config(config)
+        model = AutoModelWithLMHead.from_config(config).to("cuda")
         tokenizer = AlbertTokenizer.from_pretrained(
             parser.args.model, do_lower_case=True)
-
         # model_name = 'google/mobilebert-uncased'
         # config = AutoConfig.from_pretrained(model_name)
         # tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
@@ -255,9 +254,9 @@ def init_dataset():
 
         elif parser.args.data_set == 'cifar10':
             train_transform, test_transform = get_data_transform('cifar')
-            train_dataset = datasets.CIFAR10(parser.args.data_dir, train=True, download=True,
+            train_dataset = datasets.CIFAR10(parser.args.data_dir, train=True, download=False,
                                              transform=train_transform)
-            test_dataset = datasets.CIFAR10(parser.args.data_dir, train=False, download=True,
+            test_dataset = datasets.CIFAR10(parser.args.data_dir, train=False, download=False,
                                             transform=test_transform)
 
         elif parser.args.data_set == "imagenet":
@@ -275,7 +274,6 @@ def init_dataset():
 
         elif parser.args.data_set == 'femnist':
             from fedscale.dataloaders.femnist import FEMNIST
-            print("GETTING FEMNIST")
             train_transform, test_transform = get_data_transform('mnist')
             train_dataset = FEMNIST(
                 parser.args.data_dir, dataset='train', transform=train_transform)

@@ -29,10 +29,10 @@ setup_commands:
 # Default parameters are specified in config_parser.py, wherein more description of the parameter can be found
 
 job_conf: 
-    - job_name: amazon                   # Generate logs under this folder: log_path/job_name/time_stamp
+    - job_name: amazon_gossip                   # Generate logs under this folder: log_path/job_name/time_stamp
     - log_path: /n/home10/steveli/FedScale/benchmark # Path of log files
     - task: text_clf
-    - num_participants: 100                      # Number of participants per round, we use K=100 in our paper, large K will be much slower
+    - num_participants: 40                      # Number of participants per round, we use K=100 in our paper, large K will be much slower
     - data_set: amazon                     # Dataset: openImg, google_speech, reddit
     - data_dir: /n/home10/steveli/FedScale/benchmark/dataset/data/amazon    # Path of the dataset
     - data_map_file: /n/home10/steveli/FedScale/benchmark/dataset/data/amazon/client_data_mapping/train.csv              # Allocation of data to each client, turn to iid setting if not provided

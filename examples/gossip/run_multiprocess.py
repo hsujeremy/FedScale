@@ -5,8 +5,12 @@ import fedscale.cloud.config_parser as parser
 from fedscale.cloud.gossip.gossip_coordinator import GossipCoordinator
 from fedscale.cloud.gossip.gossip_executor import Executor
 
+import os
 import datetime
 import yaml
+
+os.environ["WANDB__SERVICE_WAIT"] = "60"
+
 
 def run_executor(port):
     parser.args.port = port
@@ -47,8 +51,17 @@ def main():
         parser.args.job_name = conf["job_name"]
         parser.args.data_dir = conf["data_dir"]
         parser.args.data_set = conf["data_set"]
-        parser.args.task = conf["task"]
-        parser.args.learning_rate = conf["learning_rate"]
+        parser.args.learning_rate = float(conf["learning_rate"])
+        
+        if "model_zoo" in conf:
+            parser.args.model_zoo = conf["model_zoo"]
+        
+        if "task" in conf: 
+            parser.args.task = conf["task"]
+        
+        if "input_shape" in conf: 
+            parser.args.input_shape = conf["input_shape"]
+
 
     num_processes = local_args.num_executors + 1
     if num_processes < 2:
